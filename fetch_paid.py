@@ -1,271 +1,263 @@
 
 """
-Fetch paid advertising insights and leads from Facebook Marketing API.
-References:
-- Marketing API Insights: https://developers.facebook.com/docs/marketing-api/insights/
-- Lead Ads guide: https://developers.facebook.com/docs/marketing-api/guides/lead-ads/
+Facebook Ads API integration for fetching paid campaign performance data.
+Reference: https://developers.facebook.com/docs/marketing-api/insights/
 """
 import logging
-import pandas as pd
 from datetime import datetime, timedelta
 from facebook_business.adobjects.adaccount import AdAccount
-from facebook_business.adobjects.leadgenform import LeadgenForm
+from facebook_business.adobjects.adsinsights import AdsInsights
 from facebook_business.exceptions import FacebookError
 from fb_client import fb_client
-from config import config
+from data_store import data_store
 
 logger = logging.getLogger(__name__)
 
-def fetch_ad_insights(level='campaign', fields=None, date_preset=None, since=None, until=None, 
-                     filtering=None, breakdowns=None, time_increment=None):
+def get_campaign_performance(date_preset='last_7d', level='campaign', fields=None):
     """
-    Fetch ad insights from Marketing API.
+    Fetch campaign performance data from Facebook Ads API.
     
     Args:
-        level: 'account', 'campaign', 'adset', 'ad'
-        fields: list of fields to fetch
-        date_preset: 'today', 'yesterday', 'last_7d', 'last_30d', etc.
-        since/until: date strings in YYYY-MM-DD format
-        filtering: list of filter dictionaries
-        breakdowns: list of breakdown fields
-        time_increment: 1 (daily), 7 (weekly), monthly
+        date_preset: Date range preset (last_7d, last_30d, etc.)
+        level: Reporting level (campaign, adset, ad)
+        fields: List of fields to retrieve
     
     Returns:
-        pandas.DataFrame with insights data
-        
-    Reference: Tested in Graph Explorer: 
-    GET /act_{AD_ACCOUNT_ID}/insights?fields=impressions,clicks,spend&date_preset=last_7d
+        list: Campaign performance data or empty list if error
     """
     if not fb_client.is_initialized():
-        logger.error("Facebook client not initialized")
-        return pd.DataFrame()
+        logger.error("Facebook client not initialized - cannot fetch campaign data")
+        return []
     
-    # Default fields if none provided
     if fields is None:
         fields = [
-            'impressions', 'clicks', 'spend', 'reach', 'frequency',
-            'ctr', 'cpc', 'cpm', 'cpp', 'actions', 'action_values',
-            'conversions', 'conversion_values', 'cost_per_action_type',
-            'cost_per_conversion', 'campaign_name', 'adset_name', 'ad_name'
+            'campaign_id',
+            'campaign_name', 
+            'impressions',
+            'clicks',
+            'spend',
+            'reach',
+            'frequency',
+            'ctr',
+            'cpc',
+            'cpm',
+            'cpp',
+            'date_start',
+            'date_stop'
         ]
     
-    # Build parameters
-    params = {'level': level, 'fields': fields}
-    
-    # Date parameters
-    if date_preset:
-        params['date_preset'] = date_preset
-    elif since and until:
-        params['time_range'] = {'since': since, 'until': until}
-    else:
-        # Default to last 7 days
-        params['date_preset'] = 'last_7d'
-    
-    # Optional parameters
-    if filtering:
-        params['filtering'] = filtering
-    if breakdowns:
-        params['breakdowns'] = breakdowns
-    if time_increment:
-        params['time_increment'] = time_increment
-    
     try:
-        logger.info(f"Fetching {level} insights with params: {params}")
+        ad_account = fb_client.get_ad_account()
+        if not ad_account:
+            logger.error("No ad account available")
+            return []
         
-        # Get insights from ad account
-        insights = fb_client.ad_account.get_insights(params=params)
+        logger.info(f"Fetching {level} insights for date preset: {date_preset}")
         
-        # Convert to list and handle paging
-        insights_data = []
+        # Get insights from Facebook API
+        insights = ad_account.get_insights(
+            fields=fields,
+            params={
+                'date_preset': date_preset,
+                'level': level,
+                'limit': 100
+            }
+        )
+        
+        performance_data = []
         for insight in insights:
-            insights_data.append(dict(insight))
+            data = dict(insight)
+            
+            # Store in database
+            data_store.store_performance_data(
+                entity_type=level,
+                entity_id=data.get('campaign_id') or data.get('adset_id') or data.get('ad_id'),
+                entity_name=data.get('campaign_name') or data.get('adset_name') or data.get('ad_name'),
+                data=data,
+                source='facebook_ads'
+            )
+            
+            performance_data.append(data)
         
-        # Handle pagination if there are more results
-        while insights.next_page():
-            for insight in insights:
-                insights_data.append(dict(insight))
-        
-        if not insights_data:
-            logger.warning("No insights data returned")
-            return pd.DataFrame()
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(insights_data)
-        
-        # Parse date_start and date_stop to datetime
-        if 'date_start' in df.columns:
-            df['date_start'] = pd.to_datetime(df['date_start'])
-        if 'date_stop' in df.columns:
-            df['date_stop'] = pd.to_datetime(df['date_stop'])
-        
-        # Flatten action columns if present
-        df = _flatten_action_columns(df)
-        
-        logger.info(f"Successfully fetched {len(df)} rows of insights data")
-        return df
+        logger.info(f"Successfully fetched {len(performance_data)} {level} records")
+        return performance_data
         
     except FacebookError as e:
-        logger.error(f"Error fetching ad insights: {e}")
-        return pd.DataFrame()
+        logger.error(f"Facebook API error: {e}")
+        return []
     except Exception as e:
-        logger.error(f"Unexpected error fetching ad insights: {e}")
-        return pd.DataFrame()
+        logger.error(f"Unexpected error fetching campaign performance: {e}")
+        return []
 
-def fetch_leads():
+def get_campaign_performance_summary(campaign_ids=None, date_preset='last_7d'):
     """
-    Fetch leads from Lead Generation forms.
+    Get summarized campaign performance data.
+    
+    Args:
+        campaign_ids: List of specific campaign IDs (optional)
+        date_preset: Date range preset
     
     Returns:
-        pandas.DataFrame with leads data including flattened field_data
+        dict: Summary statistics
+    """
+    try:
+        performance_data = get_campaign_performance(date_preset=date_preset, level='campaign')
         
-    Reference: https://developers.facebook.com/docs/marketing-api/guides/lead-ads/
+        if not performance_data:
+            return {
+                'total_campaigns': 0,
+                'total_spend': 0,
+                'total_impressions': 0,
+                'total_clicks': 0,
+                'average_ctr': 0,
+                'average_cpc': 0
+            }
+        
+        # Filter by campaign IDs if provided
+        if campaign_ids:
+            performance_data = [
+                data for data in performance_data 
+                if data.get('campaign_id') in campaign_ids
+            ]
+        
+        # Calculate summary metrics
+        total_spend = sum(float(data.get('spend', 0)) for data in performance_data)
+        total_impressions = sum(int(data.get('impressions', 0)) for data in performance_data)
+        total_clicks = sum(int(data.get('clicks', 0)) for data in performance_data)
+        
+        average_ctr = (total_clicks / total_impressions * 100) if total_impressions > 0 else 0
+        average_cpc = (total_spend / total_clicks) if total_clicks > 0 else 0
+        
+        summary = {
+            'total_campaigns': len(performance_data),
+            'total_spend': total_spend,
+            'total_impressions': total_impressions,
+            'total_clicks': total_clicks,
+            'average_ctr': round(average_ctr, 2),
+            'average_cpc': round(average_cpc, 2),
+            'date_range': date_preset
+        }
+        
+        logger.info(f"Generated performance summary: {summary}")
+        return summary
+        
+    except Exception as e:
+        logger.error(f"Error generating campaign performance summary: {e}")
+        return {}
+
+def get_ad_performance(campaign_id=None, date_preset='last_7d'):
+    """
+    Get ad-level performance data.
+    
+    Args:
+        campaign_id: Specific campaign ID to filter by
+        date_preset: Date range preset
+    
+    Returns:
+        list: Ad performance data
     """
     if not fb_client.is_initialized():
         logger.error("Facebook client not initialized")
-        return pd.DataFrame()
+        return []
     
     try:
-        logger.info("Fetching lead generation forms")
+        params = {
+            'date_preset': date_preset,
+            'level': 'ad',
+            'limit': 100
+        }
         
-        # Get leadgen forms
-        forms = fb_client.ad_account.get_leadgen_forms(fields=['id', 'name', 'created_time'])
+        if campaign_id:
+            params['filtering'] = [{'field': 'campaign.id', 'operator': 'IN', 'value': [campaign_id]}]
         
-        all_leads = []
-        
-        for form in forms:
-            form_id = form['id']
-            form_name = form.get('name', 'Unknown Form')
-            
-            logger.info(f"Fetching leads from form: {form_name} ({form_id})")
-            
-            # Get leads from this form
-            leadgen_form = LeadgenForm(form_id)
-            leads = leadgen_form.get_leads(fields=[
-                'id', 'field_data', 'created_time', 'ad_id', 'adset_id', 'campaign_id'
-            ])
-            
-            for lead in leads:
-                lead_data = dict(lead)
-                lead_data['form_id'] = form_id
-                lead_data['form_name'] = form_name
-                
-                # Flatten field_data
-                if 'field_data' in lead_data:
-                    for field in lead_data['field_data']:
-                        field_name = field.get('name', 'unknown_field')
-                        field_values = field.get('values', [])
-                        # Join multiple values with semicolon
-                        lead_data[f"field_{field_name}"] = '; '.join(field_values) if field_values else ''
-                    
-                    # Remove original field_data
-                    del lead_data['field_data']
-                
-                all_leads.append(lead_data)
-        
-        if not all_leads:
-            logger.warning("No leads found")
-            return pd.DataFrame()
-        
-        df = pd.DataFrame(all_leads)
-        
-        # Parse created_time
-        if 'created_time' in df.columns:
-            df['created_time'] = pd.to_datetime(df['created_time'])
-        
-        logger.info(f"Successfully fetched {len(df)} leads")
-        return df
-        
-    except FacebookError as e:
-        logger.error(f"Error fetching leads: {e}")
-        return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Unexpected error fetching leads: {e}")
-        return pd.DataFrame()
-
-def _flatten_action_columns(df):
-    """
-    Flatten actions and action_values columns into separate columns.
-    
-    Args:
-        df: DataFrame with potential actions/action_values columns
-        
-    Returns:
-        DataFrame with flattened action columns
-    """
-    if 'actions' in df.columns:
-        df = _flatten_action_column(df, 'actions', 'action')
-    
-    if 'action_values' in df.columns:
-        df = _flatten_action_column(df, 'action_values', 'action_value')
-    
-    if 'conversions' in df.columns:
-        df = _flatten_action_column(df, 'conversions', 'conversion')
-    
-    if 'conversion_values' in df.columns:
-        df = _flatten_action_column(df, 'conversion_values', 'conversion_value')
-    
-    return df
-
-def _flatten_action_column(df, column_name, prefix):
-    """Helper function to flatten action-type columns."""
-    if column_name not in df.columns:
-        return df
-    
-    # Create new columns for each action type
-    action_types = set()
-    for actions in df[column_name].dropna():
-        if isinstance(actions, list):
-            for action in actions:
-                if isinstance(action, dict) and 'action_type' in action:
-                    action_types.add(action['action_type'])
-    
-    # Add columns for each action type
-    for action_type in action_types:
-        column = f"{prefix}_{action_type}"
-        df[column] = df[column_name].apply(
-            lambda x: _extract_action_value(x, action_type) if x else 0
+        ad_account = fb_client.get_ad_account()
+        insights = ad_account.get_insights(
+            fields=[
+                'ad_id',
+                'ad_name',
+                'campaign_id',
+                'campaign_name',
+                'adset_id',
+                'adset_name',
+                'impressions',
+                'clicks',
+                'spend',
+                'ctr',
+                'cpc',
+                'cpm'
+            ],
+            params=params
         )
-    
-    return df
+        
+        ad_data = []
+        for insight in insights:
+            data = dict(insight)
+            
+            # Store in database
+            data_store.store_performance_data(
+                entity_type='ad',
+                entity_id=data.get('ad_id'),
+                entity_name=data.get('ad_name'),
+                data=data,
+                source='facebook_ads'
+            )
+            
+            ad_data.append(data)
+        
+        logger.info(f"Fetched {len(ad_data)} ad performance records")
+        return ad_data
+        
+    except Exception as e:
+        logger.error(f"Error fetching ad performance: {e}")
+        return []
 
-def _extract_action_value(actions, target_action_type):
-    """Extract value for specific action type from actions list."""
-    if not isinstance(actions, list):
-        return 0
-    
-    for action in actions:
-        if isinstance(action, dict) and action.get('action_type') == target_action_type:
-            return float(action.get('value', 0))
-    
-    return 0
-
-def get_campaign_performance_summary(days=7):
+def get_real_time_insights(campaign_ids=None):
     """
-    Get a summary of campaign performance for the specified number of days.
+    Get real-time campaign insights (last hour data).
     
     Args:
-        days: Number of days to look back
-        
+        campaign_ids: List of campaign IDs to check
+    
     Returns:
-        pandas.DataFrame with campaign performance summary
+        list: Real-time insights data
     """
-    # Calculate date range
-    end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=days)
+    if not fb_client.is_initialized():
+        logger.error("Facebook client not initialized")
+        return []
     
-    # Fetch campaign insights
-    df = fetch_ad_insights(
-        level='campaign',
-        since=start_date.strftime('%Y-%m-%d'),
-        until=end_date.strftime('%Y-%m-%d'),
-        fields=['campaign_name', 'impressions', 'clicks', 'spend', 'ctr', 'cpc', 'cpm']
-    )
-    
-    if df.empty:
-        return df
-    
-    # Calculate additional metrics
-    df['cost_per_click'] = pd.to_numeric(df.get('spend', 0)) / pd.to_numeric(df.get('clicks', 1))
-    df['cost_per_mille'] = pd.to_numeric(df.get('spend', 0)) / pd.to_numeric(df.get('impressions', 1)) * 1000
-    
-    return df
+    try:
+        ad_account = fb_client.get_ad_account()
+        
+        params = {
+            'date_preset': 'today',
+            'level': 'campaign',
+            'time_increment': 1  # Hourly breakdown
+        }
+        
+        if campaign_ids:
+            params['filtering'] = [{'field': 'campaign.id', 'operator': 'IN', 'value': campaign_ids}]
+        
+        insights = ad_account.get_insights(
+            fields=[
+                'campaign_id',
+                'campaign_name',
+                'impressions',
+                'clicks',
+                'spend',
+                'date_start',
+                'date_stop'
+            ],
+            params=params
+        )
+        
+        real_time_data = []
+        for insight in insights:
+            data = dict(insight)
+            real_time_data.append(data)
+        
+        logger.info(f"Fetched {len(real_time_data)} real-time insight records")
+        return real_time_data
+        
+    except Exception as e:
+        logger.error(f"Error fetching real-time insights: {e}")
+        return []
