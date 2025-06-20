@@ -23,12 +23,23 @@ logger = logging.getLogger(__name__)
 GRAPH_API_VERSION = "v23.0"
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
-# Cache for page insights metadata
+# Cache for page insights metadata with comprehensive fallback
 _cached_page_metrics = None
 _metadata_fetch_failed = False
 
-# Fallback Page metrics when metadata fetch fails
-FALLBACK_PAGE_METRICS = ["page_impressions", "page_engaged_users", "page_reach"]
+# Comprehensive fallback Page metrics when metadata fetch fails
+# Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
+FALLBACK_PAGE_METRICS = [
+    "page_impressions", 
+    "page_engaged_users", 
+    "page_reach",
+    "page_impressions_organic",
+    "page_impressions_paid",
+    "page_post_engagements",
+    "page_views_total",
+    "page_fan_adds",
+    "page_fan_removes"
+]
 
 # Valid Instagram metrics for Graph API v23.0
 # Official docs: https://developers.facebook.com/docs/instagram-api/reference/ig-media/insights
@@ -84,6 +95,7 @@ def validate_organic_environment():
 def get_cached_page_metrics():
     """
     Get cached Page metrics metadata with robust fallback mechanism.
+    Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
 
     Returns:
         List of available metric names or fallback metrics if metadata fetch fails
@@ -112,11 +124,16 @@ def get_cached_page_metrics():
     logger.info(f"Fetching Page insights metadata from: {url}")
 
     try:
-        resp = requests.get(url, params={"access_token": token})
-        try:
-            body = resp.json()
-        except ValueError:
-            body = {"error": "Non-JSON response"}
+        resp = requests.get(url, params={"access_token": token}, timeout=10)
+        
+        # Better JSON parsing with content-type check
+        if resp.headers.get('Content-Type', '').startswith('application/json'):
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {"error": "Invalid JSON response"}
+        else:
+            body = {"error": f"Non-JSON response, content-type: {resp.headers.get('Content-Type')}"}
 
         if resp.status_code != 200 or "error" in body:
             logger.error(f"Page insights metadata error: status {resp.status_code}, response JSON: {body}")
@@ -126,13 +143,28 @@ def get_cached_page_metrics():
         else:
             data = body.get("data", [])
             metric_names = [item.get("name") for item in data if item.get("name")]
-            logger.info(f"Fetched {len(metric_names)} Page metrics metadata: {metric_names[:10]} ...")
-            _cached_page_metrics = metric_names
+            logger.info(f"Successfully fetched {len(metric_names)} Page metrics metadata")
+            if metric_names:
+                _cached_page_metrics = metric_names
+            else:
+                logger.warning("Empty metrics metadata, using fallback")
+                _metadata_fetch_failed = True
+                _cached_page_metrics = FALLBACK_PAGE_METRICS
 
         return _cached_page_metrics
 
+    except requests.exceptions.Timeout:
+        logger.error("Timeout fetching Page metadata")
+        _metadata_fetch_failed = True
+        _cached_page_metrics = FALLBACK_PAGE_METRICS
+        return _cached_page_metrics
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error fetching Page metadata: {e}")
+        _metadata_fetch_failed = True
+        _cached_page_metrics = FALLBACK_PAGE_METRICS
+        return _cached_page_metrics
     except Exception as e:
-        logger.error(f"Exception fetching Page metadata: {e}", exc_info=True)
+        logger.error(f"Unexpected error fetching Page metadata: {e}", exc_info=True)
         _metadata_fetch_failed = True
         _cached_page_metrics = FALLBACK_PAGE_METRICS
         logger.warning(f"Using fallback Page metrics: {_cached_page_metrics}")

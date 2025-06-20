@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from config import config
 
+# Import fb_client for API access
+from fb_client import fb_client
+
 # Facebook Business SDK imports for creative previews
 # Official docs: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/
 try:
@@ -222,7 +225,7 @@ def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
                 }
 
                 # Copy performance metrics from row
-                for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'date_start', 'date_stop']:
+                for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm', 'date_start', 'date_stop']:
                     record[col] = row.get(col, 0)
 
                 records.append(record)
@@ -243,7 +246,7 @@ def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
                 "creative_thumbnail_url": None,
                 "creative_object_url": None,
             }
-            for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'date_start', 'date_stop']:
+            for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm', 'date_start', 'date_stop']:
                 record[col] = row.get(col, 0)
             records.append(record)
 
@@ -252,7 +255,7 @@ def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
             "campaign_id", "campaign_name", "ad_id", "ad_name", "creative_id", "creative_name",
             "creative_body", "creative_title", "creative_image_url", "creative_thumbnail_url", 
             "creative_object_url", "impressions", "clicks", "spend", "reach", "frequency",
-            "ctr", "cpc", "date_start", "date_stop"
+            "ctr", "cpc", "cpm", "date_start", "date_stop"
         ])
 
     df_enriched = pd.DataFrame(records)
@@ -278,13 +281,13 @@ def get_campaign_performance_with_creatives(date_preset: str = "last_7d", includ
 
     return df_campaigns
 
-def get_campaign_performance_summary(date_preset: str = "last_7d") -> Dict:
+def get_campaign_performance_summary(date_preset: str = "last_7d", campaign_ids: List[str] = None) -> Dict:
     """
     Get summarized campaign performance data.
 
     Args:
-        campaign_ids: List of specific campaign IDs (optional)
         date_preset: Date range preset
+        campaign_ids: List of specific campaign IDs (optional)
 
     Returns:
         dict: Summary statistics
@@ -384,41 +387,31 @@ def get_real_time_insights(campaign_ids=None):
     )
 
 if __name__ == "__main__":
-    # Test creative preview functionality
+    # Set env vars for testing
     import os
-
-    # Set test environment variables (replace with actual values)
-    # os.environ["META_ACCESS_TOKEN"] = "<your_access_token>"
-    # os.environ["AD_ACCOUNT_ID"] = "<your_ad_account_id>"
-
+    # os.environ["PAGE_ACCESS_TOKEN"] = "<PAGE_ACCESS_TOKEN>"
+    # os.environ["IG_USER_ID"] = "<IG_USER_ID>"
+    # os.environ["AD_ACCOUNT_ID"] = "<AD_ACCOUNT_ID>"
+    # os.environ["META_ACCESS_TOKEN"] = "<META_ACCESS_TOKEN>"
+    # os.environ["META_APP_ID"] = "<META_APP_ID>"
+    # os.environ["META_APP_SECRET"] = "<META_APP_SECRET>"
+    
+    # Test fb_client
+    print("fb_client.account:", getattr(fb_client, "account", None))
+    print("fb_client initialized:", fb_client.is_initialized())
+    
+    # Test paid fetch
     logger.info("🧪 Testing paid campaign fetch with creative previews...")
-
     try:
-        # Test campaign performance with creatives
-        df_with_creatives = get_campaign_performance_with_creatives(
-            date_preset="last_7d", 
-            include_creatives=True
-        )
-        print(f"Campaign data with creatives: {len(df_with_creatives)} records")
-        print("Columns:", df_with_creatives.columns.tolist())
-
-        if not df_with_creatives.empty:
-            print("\nSample creative data:")
-            creative_columns = ['campaign_name', 'ad_name', 'creative_title', 'creative_image_url']
-            available_creative_cols = [col for col in creative_columns if col in df_with_creatives.columns]
-            if available_creative_cols:
-                print(df_with_creatives[available_creative_cols].head())
-
+        df_paid = get_campaign_performance_with_creatives(date_preset="last_7d")
+        print("Paid head:", df_paid.head() if not df_paid.empty else "Empty DataFrame")
+        print("Paid cols:", df_paid.columns.tolist())
+        
+        if not df_paid.empty:
             # Check for preview URLs
-            has_images = df_with_creatives['creative_image_url'].notna().sum()
-            has_thumbnails = df_with_creatives['creative_thumbnail_url'].notna().sum()
-            print(f"\nPreview URLs found: {has_images} images, {has_thumbnails} thumbnails")
-
-        else:
-            print("No campaign data returned")
-
+            has_images = df_paid['creative_image_url'].notna().sum() if 'creative_image_url' in df_paid.columns else 0
+            has_thumbnails = df_paid['creative_thumbnail_url'].notna().sum() if 'creative_thumbnail_url' in df_paid.columns else 0
+            print(f"Preview URLs found: {has_images} images, {has_thumbnails} thumbnails")
     except Exception as e:
-        print(f"Test failed: {e}")
-        logger.error(f"Test error: {e}", exc_info=True)
-
-    # Example usage
+        print(f"Paid test failed: {e}")
+        logger.error(f"Paid test error: {e}", exc_info=True)
