@@ -115,7 +115,7 @@ if __name__ == "__main__":
     if fb_client.is_initialized():
         test_result = fb_client.test_connection()
         print(f"Connection test: {test_result}")
-    print(f"fb_client.account: {getattr(fb_client, 'account', None)}")e__}")
+    print(f"fb_client.account: {getattr(fb_client, 'account', None)}")
 
 class FacebookClient:
     """Facebook Business SDK client wrapper."""
