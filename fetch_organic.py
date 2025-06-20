@@ -1,34 +1,39 @@
 """
-Fetch organic content insights from Facebook Pages and Instagram.
-Handles both Facebook Page insights and Instagram Business Account insights.
+Enhanced fetch organic content insights from Facebook Pages and Instagram.
+Handles comprehensive Instagram Business Account insights with metadata-driven discovery.
 
 Official docs:
 - Page Insights: https://developers.facebook.com/docs/graph-api/reference/page/insights/
 - Instagram Insights: https://developers.facebook.com/docs/instagram-api/guides/insights/
 - Token requirements: https://developers.facebook.com/docs/facebook-login/access-tokens
 
-Updated Graph API version to v23.0 with dynamic metric discovery and robust fallback mechanisms
+Updated with comprehensive Instagram metrics discovery, advanced KPIs, and optimized performance
 """
 import os
 import requests
 import pandas as pd
 import logging
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 from config import config
 
 logger = logging.getLogger(__name__)
 
 # Graph API version and base URL for consistent endpoint calls
-GRAPH_API_VERSION = "v23.0"
+GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v19.0")
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+
+# Session-level caches for Instagram insights optimization
+_media_metrics_cache = {}          # key: (media_type, media_product_type), value: [metrics]
+_ig_user_followers = None          # cache follower count
+_ig_media_metadata_cache = {}      # key: media_id, value: metadata dict (supported metrics)
+_ig_user_insights_cache = {}       # cache for user-level insights
 
 # Cache for page insights metadata with comprehensive fallback
 _cached_page_metrics = None
 _metadata_fetch_failed = False
 
 # Comprehensive fallback Page metrics when metadata fetch fails
-# Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
 FALLBACK_PAGE_METRICS = [
     "page_impressions", 
     "page_engaged_users", 
@@ -41,32 +46,31 @@ FALLBACK_PAGE_METRICS = [
     "page_fan_removes"
 ]
 
-# Comprehensive Instagram metrics for Graph API v23.0
-# Official docs: https://developers.facebook.com/docs/instagram-api/reference/ig-media/insights
+# Comprehensive Instagram metrics for Graph API - organized by category
 VALID_IG_METRICS = {
     # Core engagement metrics
     "impressions", "reach", "likes", "comments", "shares", "saves", "saved",
     "total_interactions", "replies", "follows", "profile_visits", "profile_activity",
-    
+
     # Video metrics (general)
     "video_views", "plays", "views",
-    
+
     # Reels-specific metrics (comprehensive)
     "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", 
     "clips_replays_count", "ig_reels_aggregated_all_plays_count",
     "ig_reels_plays", "ig_reels_reach", "ig_reels_impressions",
     "ig_reels_likes", "ig_reels_comments", "ig_reels_shares",
     "ig_reels_saves", "ig_reels_total_interactions",
-    
+
     # Story metrics
     "taps_forward", "taps_back", "exits", "replies",
-    
+
     # Navigation metrics
     "navigation",
-    
+
     # Additional engagement
     "website_clicks", "get_directions_clicks", "text_message_clicks",
-    "email_contacts", "phone_call_clicks"
+    "email_contacts", "phone_call_clicks", "engagement"
 }
 
 # Enhanced default Instagram metrics including Reels
@@ -111,803 +115,561 @@ def validate_organic_environment():
     logger.info(f"Organic insights validation: {validation}")
     return validation
 
-def get_cached_page_metrics():
+def get_ig_follower_count(ig_user_id: str) -> Optional[int]:
     """
-    Get cached Page metrics metadata with robust fallback mechanism.
-    Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
+    Fetch Instagram Business Account follower count with caching.
+
+    Args:
+        ig_user_id: Instagram Business User ID
 
     Returns:
-        List of available metric names or fallback metrics if metadata fetch fails
+        Follower count or None if fetch fails
     """
-    global _cached_page_metrics, _metadata_fetch_failed
+    global _ig_user_followers
 
-    if _cached_page_metrics is not None:
-        return _cached_page_metrics
+    if _ig_user_followers is not None:
+        return _ig_user_followers
 
-    if _metadata_fetch_failed:
-        logger.info("Using fallback Page metrics (metadata previously failed)")
-        _cached_page_metrics = FALLBACK_PAGE_METRICS
-        return _cached_page_metrics
-
-    # Try metadata fetch
-    page_id = os.getenv("PAGE_ID")
     token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    if not ig_user_id or not token:
+        logger.warning("Missing IG_USER_ID or token for follower count.")
+        return None
 
-    if not page_id or not token:
-        logger.error("Cannot fetch Page metadata: missing PAGE_ID or token")
-        _metadata_fetch_failed = True
-        _cached_page_metrics = FALLBACK_PAGE_METRICS
-        return _cached_page_metrics
-
-    url = f"{GRAPH_API_BASE}/{page_id}/insights/metadata"
-    logger.info(f"Fetching Page insights metadata from: {url}")
+    url = f"{GRAPH_API_BASE}/{ig_user_id}"
+    params = {"fields": "followers_count", "access_token": token}
 
     try:
-        resp = requests.get(url, params={"access_token": token}, timeout=10)
-        
-        # Better JSON parsing with content-type check
-        if resp.headers.get('Content-Type', '').startswith('application/json'):
-            try:
-                body = resp.json()
-            except ValueError:
-                body = {"error": "Invalid JSON response"}
+        resp = requests.get(url, params=params, timeout=10)
+        body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+
+        if resp.status_code == 200 and "followers_count" in body:
+            _ig_user_followers = body["followers_count"]
+            logger.info(f"✅ Fetched IG follower count: {_ig_user_followers}")
+            return _ig_user_followers
         else:
-            body = {"error": f"Non-JSON response, content-type: {resp.headers.get('Content-Type')}"}
+            logger.warning(f"❌ Failed to fetch follower count: {body}")
 
-        if resp.status_code != 200 or "error" in body:
-            logger.error(f"Page insights metadata error: status {resp.status_code}, response JSON: {body}")
-            _metadata_fetch_failed = True
-            _cached_page_metrics = FALLBACK_PAGE_METRICS
-            logger.warning(f"Using fallback Page metrics: {_cached_page_metrics}")
-        else:
-            data = body.get("data", [])
-            metric_names = [item.get("name") for item in data if item.get("name")]
-            logger.info(f"Successfully fetched {len(metric_names)} Page metrics metadata")
-            if metric_names:
-                _cached_page_metrics = metric_names
-            else:
-                logger.warning("Empty metrics metadata, using fallback")
-                _metadata_fetch_failed = True
-                _cached_page_metrics = FALLBACK_PAGE_METRICS
-
-        return _cached_page_metrics
-
-    except requests.exceptions.Timeout:
-        logger.error("Timeout fetching Page metadata")
-        _metadata_fetch_failed = True
-        _cached_page_metrics = FALLBACK_PAGE_METRICS
-        return _cached_page_metrics
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error fetching Page metadata: {e}")
-        _metadata_fetch_failed = True
-        _cached_page_metrics = FALLBACK_PAGE_METRICS
-        return _cached_page_metrics
     except Exception as e:
-        logger.error(f"Unexpected error fetching Page metadata: {e}", exc_info=True)
-        _metadata_fetch_failed = True
-        _cached_page_metrics = FALLBACK_PAGE_METRICS
-        logger.warning(f"Using fallback Page metrics: {_cached_page_metrics}")
-        return _cached_page_metrics
+        logger.error(f"Error fetching IG follower count: {e}", exc_info=True)
 
-def select_default_page_metrics(available_metrics: List[str]) -> List[str]:
+    return None
+
+def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: str = "day") -> Dict:
     """
-    Select default Page metrics from available metrics.
+    Fetch Instagram Business Account user-level insights.
 
     Args:
-        available_metrics: List of available metric names
+        ig_user_id: Instagram Business User ID
+        metrics: List of user-level metrics to fetch
+        period: Time period ('day', 'week', 'days_28', 'lifetime')
 
     Returns:
-        List of default metrics that are available
+        Dict with user-level insights data
     """
-    # Preferred default metrics (in order of preference)
-    candidates = [
-        "page_impressions_organic",
-        "page_impressions_paid", 
-        "page_engaged_users",
-        "page_reach",
-        "page_post_engagements"
-    ]
+    if not metrics:
+        metrics = ["profile_views", "website_clicks", "email_contacts"]
 
-    selected = [m for m in candidates if m in available_metrics]
-    skipped = [m for m in candidates if m not in available_metrics]
+    cache_key = f"{ig_user_id}_{period}_{'_'.join(metrics)}"
+    if cache_key in _ig_user_insights_cache:
+        return _ig_user_insights_cache[cache_key]
 
-    # If no preferred metrics are available, use the first few available metrics
-    if not selected and available_metrics:
-        selected = available_metrics[:3]  # Take first 3 available
-        logger.warning(f"No preferred metrics available, using: {selected}")
-
-    logger.info(f"Default Page metrics selected: {selected}")
-    if skipped:
-        logger.debug(f"Skipped unavailable Page metrics: {skipped}")
-
-    return selected
-
-def calculate_date_range(date_preset: str) -> tuple:
-    """
-    Calculate date range for given preset.
-    Compute yesterday via datetime.date.today() - timedelta(days=1)
-
-    Args:
-        date_preset: Preset name
-
-    Returns:
-        Tuple of (since_date, until_date) as strings
-    """
-    today = date.today()
-
-    if date_preset in ['latest', 'yesterday']:
-        target_date = today - timedelta(days=1)
-        return target_date.strftime('%Y-%m-%d'), target_date.strftime('%Y-%m-%d')
-
-    elif date_preset == 'last_7d':
-        end_date = today - timedelta(days=1)
-        start_date = end_date - timedelta(days=6)
-        return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
-
-    elif date_preset == 'last_30d':
-        end_date = today - timedelta(days=1)
-        start_date = end_date - timedelta(days=29)
-        return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
-
-    elif date_preset == 'this_month':
-        start_date = today.replace(day=1)
-        return start_date.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')
-
-    elif date_preset == 'last_month':
-        # Last day of previous month
-        first_this_month = today.replace(day=1)
-        last_last_month = first_this_month - timedelta(days=1)
-        first_last_month = last_last_month.replace(day=1)
-        return first_last_month.strftime('%Y-%m-%d'), last_last_month.strftime('%Y-%m-%d')
-
-    else:
-        logger.error(f"Unknown date preset: {date_preset}")
-        # Default to yesterday
-        target_date = today - timedelta(days=1)
-        return target_date.strftime('%Y-%m-%d'), target_date.strftime('%Y-%m-%d')
-
-def fetch_page_insights(metrics: List[str] = None, since: str = None, until: str = None, period: str = "day") -> pd.DataFrame:
-    """
-    Fetch Facebook Page insights for specified date range with robust error handling.
-
-    Args:
-        metrics: List of metric names (optional, will use defaults if None)
-        since: Start date in YYYY-MM-DD format
-        until: End date in YYYY-MM-DD format  
-        period: Time period ('day', 'week', 'days_28')
-
-    Returns:
-        DataFrame with insights data or empty DataFrame on error
-    """
-    page_id = os.getenv("PAGE_ID")
     token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    if not ig_user_id or not token:
+        logger.warning("Missing IG_USER_ID or token for user insights.")
+        return {}
 
-    if not page_id or not token:
-        logger.error("fetch_page_insights: Missing PAGE_ID or token.")
-        return pd.DataFrame()
-
-    # Get available metrics with fallback
-    available = get_cached_page_metrics()
-
-    # If caller passed metrics, filter; if None, pick defaults
-    if metrics:
-        valid = [m for m in metrics if m in available]
-    else:
-        valid = select_default_page_metrics(available)
-
-    if not valid:
-        logger.error(f"No valid Page metrics to request: requested={metrics}, available={available}")
-        return pd.DataFrame()
-
-    metric_str = ",".join(valid)
-    url = f"{GRAPH_API_BASE}/{page_id}/insights"
+    url = f"{GRAPH_API_BASE}/{ig_user_id}/insights"
     params = {
-        "metric": metric_str,
+        "metric": ",".join(metrics),
         "period": period,
-        "since": since,
-        "until": until,
         "access_token": token
     }
 
-    logger.info(f"Fetching Page insights for {since} to {until} with metrics: {valid}")
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+
+        if resp.status_code == 200 and "data" in body:
+            insights = {}
+            for metric_obj in body["data"]:
+                metric_name = metric_obj.get("name")
+                values = metric_obj.get("values", [])
+                if values:
+                    insights[metric_name] = values[-1].get("value", 0)
+
+            _ig_user_insights_cache[cache_key] = insights
+            logger.info(f"✅ Fetched IG user insights: {list(insights.keys())}")
+            return insights
+        else:
+            logger.warning(f"❌ Failed to fetch user insights: {body}")
+
+    except Exception as e:
+        logger.error(f"Error fetching IG user insights: {e}", exc_info=True)
+
+    return {}
+
+def fetch_media_insights_metadata(media_id: str) -> List[str]:
+    """
+    Fetch available metrics metadata for a specific media item.
+
+    Args:
+        media_id: Instagram media ID
+
+    Returns:
+        List of supported metric names for this media
+    """
+    if media_id in _ig_media_metadata_cache:
+        return _ig_media_metadata_cache[media_id]
+
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    if not token:
+        logger.warning("Missing token for media metadata.")
+        return []
+
+    url = f"{GRAPH_API_BASE}/{media_id}/insights/metadata"
 
     try:
-        resp = requests.get(url, params=params)
-        try:
-            body = resp.json()
-        except ValueError:
-            body = {"error": "Non-JSON response"}
+        resp = requests.get(url, params={"access_token": token}, timeout=10)
+        body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
 
-        if resp.status_code != 200 or "error" in body:
-            logger.error(f"Page insights fetch error: status {resp.status_code}, response JSON: {body}")
-            return pd.DataFrame()
+        if resp.status_code == 200 and "data" in body:
+            metrics = [item.get("name") for item in body["data"] if item.get("name")]
+            logger.info(f"📊 Media {media_id} supports metrics: {metrics}")
+            _ig_media_metadata_cache[media_id] = metrics
+            return metrics
+        else:
+            logger.info(f"⚠️ Metadata fetch not available for media {media_id}, using fallback approach")
 
-        data = body.get("data", [])
-        records = []
-
-        for mobj in data:
-            name = mobj.get("name")
-            for v in mobj.get("values", []):
-                records.append({
-                    "date": v.get("end_time", since),
-                    "metric": name,
-                    "value": v.get("value", 0)
-                })
-
-        if not records:
-            logger.info("fetch_page_insights: No records returned.")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(records)
-        df['date'] = pd.to_datetime(df['date']).dt.date
-        logger.info(f"Successfully fetched {len(df)} Page insights records")
-        return df
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"fetch_page_insights network error: {e}", exc_info=True)
-        return pd.DataFrame()
     except Exception as e:
-        logger.error(f"fetch_page_insights unexpected error: {e}", exc_info=True)
-        return pd.DataFrame()
+        logger.debug(f"Metadata fetch failed for media {media_id}: {e}")
 
-def fetch_latest_page_insights(metrics: List[str] = None, period: str = "day") -> pd.DataFrame:
+    _ig_media_metadata_cache[media_id] = []
+    return []
+
+def choose_metrics_for_media(media: Dict) -> List[str]:
     """
-    Fetch latest (yesterday's) Page insights.
+    Choose optimal metrics for a media item based on type and metadata.
 
     Args:
-        metrics: List of metric names (optional)
-        period: Time period ('day', 'week', 'days_28')
+        media: Dict with keys id, media_type, media_product_type, timestamp, etc.
 
     Returns:
-        DataFrame with latest insights data
+        List of metric names supported and high-impact for this media
     """
-    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-    logger.info(f"Fetching latest Page insights for date: {yesterday}")
-    return fetch_page_insights(metrics=metrics, since=yesterday, until=yesterday, period=period)
+    media_id = media.get("id")
+    media_type = media.get("media_type", "").upper()
+    product_type = media.get("media_product_type", "").upper()
 
-def discover_ig_media_metrics(ig_user_id: str, sample_media_id: str = None) -> List[str]:
+    # Try metadata first for precise metric discovery
+    supported = fetch_media_insights_metadata(media_id)
+
+    if supported:
+        # Build prioritized metric list based on metadata
+        chosen = []
+
+        # Core engagement metrics (highest priority)
+        for metric in ["total_interactions", "likes", "comments", "shares", "saves", "saved"]:
+            if metric in supported:
+                chosen.append(metric)
+
+        # Reach/impressions (essential for KPI calculation)
+        for metric in ["impressions", "reach"]:
+            if metric in supported:
+                chosen.append(metric)
+
+        # Video/Reels specific metrics
+        if "VIDEO" in media_type or "REEL" in product_type:
+            video_metrics = [
+                "video_views", "plays", "profile_visits", "follows", "navigation",
+                "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", 
+                "clips_replays_count", "ig_reels_aggregated_all_plays_count",
+                "ig_reels_plays", "ig_reels_reach", "ig_reels_impressions"
+            ]
+            for metric in video_metrics:
+                if metric in supported and metric not in chosen:
+                    chosen.append(metric)
+
+        # Additional engagement metrics
+        additional_metrics = ["engagement", "website_clicks", "email_contacts", "phone_call_clicks"]
+        for metric in additional_metrics:
+            if metric in supported and metric not in chosen:
+                chosen.append(metric)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        final = [m for m in chosen if not (m in seen or seen.add(m))]
+
+        logger.info(f"🎯 Chosen metrics for media {media_id} ({media_type}/{product_type}): {final}")
+        return final
+
+    # Fallback based on media type when metadata unavailable
+    if "REEL" in product_type or media_type == "VIDEO":
+        fallback = ["impressions", "reach", "video_views", "total_interactions", "plays"]
+    elif media_type == "IMAGE":
+        fallback = ["impressions", "reach", "total_interactions", "likes", "comments"]
+    elif media_type == "CAROUSEL_ALBUM":
+        fallback = ["impressions", "reach", "total_interactions", "likes", "comments"]
+    else:
+        fallback = ["impressions", "reach", "total_interactions"]
+
+    # Filter fallback against known valid metrics
+    filtered_fallback = [m for m in fallback if m in VALID_IG_METRICS]
+
+    logger.info(f"📋 No metadata for media {media_id}, using fallback metrics: {filtered_fallback}")
+    return filtered_fallback
+
+def fetch_insights_for_media(media: Dict) -> List[Dict]:
     """
-    Discover available Instagram metrics by testing with a sample media.
-    
+    Fetch insights for a single media item with iterative metric removal.
+
     Args:
-        ig_user_id: Instagram Business User ID
-        sample_media_id: Optional specific media ID to test with
-        
+        media: Dict with media information from /{ig_user_id}/media
+
     Returns:
-        List of available metric names for this account/media type
+        List of records with media info + metric + value
     """
+    media_id = media.get("id")
+    timestamp = media.get("timestamp")
+    caption = media.get("caption", "")
+    media_url = media.get("media_url")
+    permalink = media.get("permalink")
+    thumbnail_url = media.get("thumbnail_url")
+    media_type = media.get("media_type")
+    media_product_type = media.get("media_product_type")
+
     token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
-    
-    if not ig_user_id or not token:
-        logger.warning("Cannot discover metrics: missing IG_USER_ID or token")
-        return list(DEFAULT_IG_METRICS)
-    
-    # Get a sample media if not provided
-    if not sample_media_id:
-        try:
-            url_media = f"{GRAPH_API_BASE}/{ig_user_id}/media"
-            params_media = {"fields": "id,media_type", "access_token": token, "limit": 1}
-            resp = requests.get(url_media, params=params_media, timeout=10)
-            
-            if resp.status_code == 200:
-                body = resp.json()
-                media_list = body.get("data", [])
-                if media_list:
-                    sample_media_id = media_list[0].get("id")
-                    logger.info(f"Using sample media for metric discovery: {sample_media_id}")
-            
-            if not sample_media_id:
-                logger.warning("No sample media found for metric discovery")
-                return list(DEFAULT_IG_METRICS)
-                
-        except Exception as e:
-            logger.error(f"Error getting sample media for discovery: {e}")
-            return list(DEFAULT_IG_METRICS)
-    
-    # Test metrics in batches to find supported ones
-    available_metrics = []
-    test_batches = [
-        # Core metrics
-        ["impressions", "reach", "likes", "comments", "shares"],
-        # Video/Reels metrics  
-        ["plays", "video_views", "ig_reels_plays", "ig_reels_video_view_total_time"],
-        # Advanced Reels metrics
-        ["ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count"],
-        # Engagement metrics
-        ["total_interactions", "saves", "saved", "replies"],
-        # Additional metrics
-        ["profile_visits", "follows", "website_clicks"]
-    ]
-    
-    for batch in test_batches:
-        metric_str = ",".join(batch)
-        url = f"{GRAPH_API_BASE}/{sample_media_id}/insights"
+    records = []
+
+    metrics = choose_metrics_for_media(media)
+    if not metrics:
+        logger.warning(f"No metrics available for media {media_id}")
+        return records
+
+    # Iterative removal approach for unsupported metrics
+    to_try = metrics.copy()
+
+    while to_try:
+        metric_str = ",".join(to_try)
+        url = f"{GRAPH_API_BASE}/{media_id}/insights"
         params = {"metric": metric_str, "access_token": token}
-        
+
         try:
             resp = requests.get(url, params=params, timeout=10)
-            if resp.status_code == 200:
-                body = resp.json()
-                if "data" in body:
-                    # All metrics in this batch are supported
-                    available_metrics.extend(batch)
-                    logger.info(f"✅ Supported metric batch: {batch}")
-                else:
-                    logger.warning(f"❌ Unsupported metric batch: {batch}")
-            else:
-                # Test individual metrics in this batch
-                for metric in batch:
-                    single_resp = requests.get(url, params={"metric": metric, "access_token": token}, timeout=5)
-                    if single_resp.status_code == 200:
-                        single_body = single_resp.json()
-                        if "data" in single_body:
-                            available_metrics.append(metric)
-                            logger.info(f"✅ Supported individual metric: {metric}")
-                        else:
-                            logger.debug(f"❌ Unsupported metric: {metric}")
-                    else:
-                        logger.debug(f"❌ Unsupported metric: {metric} (status: {single_resp.status_code})")
-                        
+            body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+
         except Exception as e:
-            logger.warning(f"Error testing metric batch {batch}: {e}")
-            continue
-    
-    if not available_metrics:
-        logger.warning("No metrics discovered, using defaults")
-        return list(DEFAULT_IG_METRICS)
-    
-    logger.info(f"🔍 Discovered {len(available_metrics)} available Instagram metrics: {available_metrics}")
-    return available_metrics
+            logger.warning(f"Exception fetching insights for media {media_id}: {e}")
+            break
 
-def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until: Optional[str] = None, metrics: Optional[List[str]] = None) -> pd.DataFrame:
+        if resp.status_code == 200 and "data" in body:
+            # Success - extract metrics
+            for metric_obj in body["data"]:
+                metric_name = metric_obj.get("name")
+                values = metric_obj.get("values", [])
+
+                if values:
+                    # Use the most recent value
+                    value = values[-1].get("value", 0)
+
+                    records.append({
+                        "media_id": media_id,
+                        "timestamp": timestamp,
+                        "caption": caption[:200] + "..." if len(caption) > 200 else caption,
+                        "media_url": media_url,
+                        "permalink": permalink,
+                        "thumbnail_url": thumbnail_url,
+                        "media_type": media_type,
+                        "media_product_type": media_product_type,
+                        "metric": metric_name,
+                        "value": value
+                    })
+
+            logger.info(f"✅ Fetched {len(records)} metric records for media {media_id}")
+            break
+
+        elif resp.status_code == 400 and "error" in body:
+            # Handle unsupported metric errors
+            error_msg = body["error"].get("message", "")
+            logger.warning(f"📱 Media {media_id} insights error: {error_msg}")
+
+            # Try to identify problematic metric from error message
+            removed_metric = None
+            for metric in to_try:
+                if metric.lower() in error_msg.lower():
+                    removed_metric = metric
+                    break
+
+            if removed_metric:
+                to_try.remove(removed_metric)
+                logger.info(f"🔄 Removed unsupported metric '{removed_metric}', retrying with {to_try}")
+                continue
+            elif len(to_try) > 1:
+                # Remove one metric and retry
+                removed_metric = to_try.pop()
+                logger.info(f"🔍 Couldn't identify problematic metric, removing '{removed_metric}' and retrying")
+                continue
+            else:
+                logger.warning(f"❌ Last metric '{to_try[0]}' unsupported for media {media_id}")
+                break
+        else:
+            logger.warning(f"❌ Insights fetch error for media {media_id}: status {resp.status_code}, {body}")
+            break
+
+    return records
+
+def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until: Optional[str] = None) -> pd.DataFrame:
     """
-    Fetch Instagram media insights in long-format DataFrame with robust error handling.
-
-    Official docs: https://developers.facebook.com/docs/instagram-api/guides/insights/
+    Fetch comprehensive Instagram media insights with metadata-driven discovery.
 
     Args:
         ig_user_id: Instagram Business User ID
         since: Start date in YYYY-MM-DD format (optional)
         until: End date in YYYY-MM-DD format (optional)
-        metrics: List of metrics (optional, defaults to safe subset)
 
     Returns:
-        DataFrame with columns ['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value']
-        Returns empty DataFrame with correct columns if fetch fails
+        DataFrame with comprehensive Instagram insights in long format
     """
     token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
 
     if not ig_user_id or not token:
-        logger.error("fetch_ig_media_insights: Missing IG_USER_ID or token.")
-        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value'])
+        logger.error("❌ Missing IG_USER_ID or token in fetch_ig_media_insights.")
+        return pd.DataFrame(columns=[
+            'media_id', 'timestamp', 'caption', 'media_url', 'permalink', 
+            'thumbnail_url', 'media_type', 'media_product_type', 'metric', 'value'
+        ])
 
-    # Determine initial metrics with dynamic discovery
-    if not metrics:
-        # Try to discover available metrics first
-        logger.info("🔍 Attempting to discover available Instagram metrics...")
-        try:
-            discovered_metrics = discover_ig_media_metrics(ig_user_id)
-            req_metrics = discovered_metrics[:5]  # Use top 5 discovered metrics
-            logger.info(f"Using discovered metrics: {req_metrics}")
-        except Exception as e:
-            logger.warning(f"Metric discovery failed: {e}, using defaults")
-            req_metrics = DEFAULT_IG_METRICS
-    else:
-        req_metrics = metrics
-
-    # Filter against VALID_IG_METRICS
-    valid_initial = [m for m in req_metrics if m in VALID_IG_METRICS]
-    if not valid_initial:
-        logger.error(f"❌ No valid IG metrics in requested {req_metrics}")
-        logger.info(f"Available metrics: {sorted(VALID_IG_METRICS)}")
-        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value'])
-
-    logger.info(f"✅ Initial valid Instagram metrics: {valid_initial}")
-
-    # Fetch media list via Graph API
-    url_media = f"{GRAPH_API_BASE}/{ig_user_id}/media"
-    params_media = {
+    # Fetch media list with comprehensive fields
+    url = f"{GRAPH_API_BASE}/{ig_user_id}/media"
+    params = {
         "fields": "id,caption,timestamp,media_type,media_product_type,media_url,permalink,thumbnail_url",
         "access_token": token,
         "limit": 100
     }
 
+    media_items = []
+
     try:
-        resp_media = requests.get(url_media, params=params_media)
-        try:
-            body_media = resp_media.json()
-        except ValueError:
-            body_media = {"error": "Non-JSON response"}
+        # Handle pagination
+        while url:
+            resp = requests.get(url, params=params, timeout=15)
+            body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
 
-        if resp_media.status_code != 200 or "error" in body_media:
-            logger.error(f"Error fetching IG media list: status {resp_media.status_code}, response: {body_media}")
-            return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value'])
-
-        media_data = body_media.get("data", [])
-        logger.info(f"Found {len(media_data)} Instagram media items")
-
-    except Exception as e:
-        logger.error(f"fetch_ig_media_insights: Exception fetching media list: {e}", exc_info=True)
-        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value'])
-
-    records = []
-
-    for media in media_data:
-        media_id = media.get("id")
-        timestamp_str = media.get("timestamp", "")
-        caption = media.get("caption", "")
-        media_url = media.get("media_url", "")
-        permalink = media.get("permalink", "")
-        thumbnail_url = media.get("thumbnail_url", "")
-
-        # Filter by date range if specified
-        if since or until:
-            try:
-                media_date = timestamp_str.split("T")[0]  # Extract YYYY-MM-DD part
-            except:
-                media_date = None
-
-            if since and media_date and media_date < since:
-                continue
-            if until and media_date and media_date > until:
-                continue
-
-        # Per-media retry logic: start with all valid metrics, remove unsupported ones
-        metrics_for_media = list(valid_initial)
-
-        while metrics_for_media:
-            metric_str = ",".join(metrics_for_media)
-            url_insights = f"{GRAPH_API_BASE}/{media_id}/insights"
-            params_insights = {"metric": metric_str, "access_token": token}
-
-            try:
-                resp_insights = requests.get(url_insights, params=params_insights)
-                try:
-                    body_insights = resp_insights.json()
-                except ValueError:
-                    body_insights = {"error": "Non-JSON response"}
-
-                if resp_insights.status_code == 200 and "data" in body_insights:
-                    # Success - extract each metric's value and create long-format records
-                    for metric_obj in body_insights.get("data", []):
-                        metric_name = metric_obj.get("name")
-                        values_list = metric_obj.get("values", [])
-
-                        if values_list:
-                            # Use the last (most recent) value
-                            metric_value = values_list[-1].get("value", 0)
-
-                            records.append({
-                                "media_id": media_id,
-                                "timestamp": timestamp_str,
-                                "caption": caption[:100] + "..." if len(caption) > 100 else caption,
-                                "media_url": media_url,
-                                "permalink": permalink,
-                                "thumbnail_url": thumbnail_url,
-                                "metric": metric_name,
-                                "value": metric_value
-                            })
-
-                    break  # Successfully processed this media
-
-                # Handle 400 error indicating unsupported metric for this media type
-                elif resp_insights.status_code == 400 and "error" in body_insights:
-                    error_msg = body_insights["error"].get("message", "")
-                    error_code = body_insights["error"].get("code", "")
-                    
-                    logger.warning(f"📱 Media {media_id} insights error: {error_msg} (code: {error_code})")
-                    logger.info(f"📊 Media type/product: {media.get('media_type')}/{media.get('media_product_type')}")
-                    logger.info(f"🎯 Attempted metrics: {metrics_for_media}")
-
-                    # Try to detect which metric caused the error by checking if metric name appears in error message
-                    # e.g., "Media does not support the impressions metric for this media product type"
-                    unsupported_metric = None
-                    for metric in metrics_for_media:
-                        if metric in error_msg.lower():
-                            unsupported_metric = metric
-                            break
-
-                    if unsupported_metric:
-                        metrics_for_media.remove(unsupported_metric)
-                        logger.info(f"🔄 Media {media_id}: removed unsupported metric '{unsupported_metric}', retrying with {metrics_for_media}")
-
-                        if not metrics_for_media:
-                            logger.warning(f"❌ Media {media_id}: no metrics left after removing unsupported ones, skipping")
-                            break
-                        continue
-                    else:
-                        # Try removing metrics one by one to isolate the problem
-                        if len(metrics_for_media) > 1:
-                            removed_metric = metrics_for_media.pop()
-                            logger.info(f"🔍 Media {media_id}: couldn't identify problematic metric, removing '{removed_metric}' and retrying")
-                            continue
-                        else:
-                            # Only one metric left and it's still failing
-                            logger.warning(f"❌ Media {media_id}: last metric '{metrics_for_media[0]}' unsupported for this media type")
-                            break
-
-                else:
-                    # Other error, skip this media
-                    logger.warning(f"Instagram insights fetch error for media {media_id}: status {resp_insights.status_code}, response: {body_insights}")
-                    break
-
-            except Exception as e:
-                logger.error(f"Error fetching insights for media {media_id}: {e}")
+            if resp.status_code != 200 or "error" in body:
+                logger.error(f"❌ Error fetching IG media list: {body}")
                 break
 
-    if not records:
-        logger.info("fetch_ig_media_insights: No media insights returned")
-        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value'])
+            data = body.get("data", [])
+            media_items.extend(data)
 
-    df = pd.DataFrame(records)
-    logger.info(f"Successfully fetched {len(df)} Instagram insights records in long format")
+            # Get next page
+            paging = body.get("paging", {})
+            url = paging.get("next")
+            params = None  # Next URL includes all params
+
+    except Exception as e:
+        logger.error(f"❌ Exception fetching IG media list: {e}", exc_info=True)
+        return pd.DataFrame(columns=[
+            'media_id', 'timestamp', 'caption', 'media_url', 'permalink', 
+            'thumbnail_url', 'media_type', 'media_product_type', 'metric', 'value'
+        ])
+
+    logger.info(f"📊 Found {len(media_items)} Instagram media items")
+
+    # Filter by date range if specified
+    filtered_media = []
+    for media in media_items:
+        timestamp = media.get("timestamp")
+        if since or until:
+            try:
+                date_str = timestamp.split("T")[0] if timestamp else None
+            except:
+                date_str = None
+
+            if since and date_str and date_str < since:
+                continue
+            if until and date_str and date_str > until:
+                continue
+
+        filtered_media.append(media)
+
+    logger.info(f"🎯 {len(filtered_media)}/{len(media_items)} media items after date filter")
+
+    # Fetch insights for each media item
+    all_records = []
+    for i, media in enumerate(filtered_media):
+        logger.info(f"📱 Processing media {i+1}/{len(filtered_media)}: {media.get('id')}")
+        records = fetch_insights_for_media(media)
+        all_records.extend(records)
+
+    if not all_records:
+        logger.warning("⚠️ No IG media insights returned.")
+        return pd.DataFrame(columns=[
+            'media_id', 'timestamp', 'caption', 'media_url', 'permalink', 
+            'thumbnail_url', 'media_type', 'media_product_type', 'metric', 'value'
+        ])
+
+    df = pd.DataFrame(all_records)
+    logger.info(f"✅ Successfully fetched {len(df)} Instagram insights records")
+
+    # Add computed date column
+    df['date'] = pd.to_datetime(df['timestamp']).dt.date
+
     return df
 
-def fetch_latest_ig_media_insights(ig_user_id: str, metrics: Optional[List[str]] = None) -> pd.DataFrame:
+def fetch_latest_ig_media_insights(ig_user_id: str) -> pd.DataFrame:
     """
-    Fetch latest (yesterday's) Instagram media insights in long-format.
+    Fetch latest (yesterday's) Instagram media insights.
 
     Args:
         ig_user_id: Instagram Business User ID
-        metrics: List of metrics (optional, defaults to safe subset)
 
     Returns:
-        DataFrame with columns ['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value']
+        DataFrame with latest Instagram insights
     """
     yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-    logger.info(f"Fetching latest Instagram insights for date: {yesterday}")
-    return fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday, metrics=metrics)
+    logger.info(f"📅 Fetching latest Instagram insights for date: {yesterday}")
+    return fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday)
 
-def get_organic_insights(date_preset: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None, metrics: Optional[List[str]] = None, include_instagram: bool = True) -> pd.DataFrame:
+def compute_instagram_kpis(df: pd.DataFrame, follower_count: Optional[int] = None) -> Dict:
     """
-    Get organic insights for Facebook Page and optionally Instagram with robust fallback mechanisms.
+    Compute advanced KPIs from Instagram insights data.
 
     Args:
-        date_preset: Preset date range ('latest', 'yesterday', 'last_7d', 'last_30d', 'this_month', 'last_month')
-        since: Custom start date (YYYY-MM-DD)
-        until: Custom end date (YYYY-MM-DD)
-        metrics: List of metrics to fetch (will be filtered for validity)
-        include_instagram: Whether to include Instagram insights
+        df: Instagram insights DataFrame (long format)
+        follower_count: Account follower count for rate calculations
 
     Returns:
-        Combined DataFrame with organic insights data
+        Dict with computed KPIs and metrics
     """
+    if df.empty:
+        return {}
+
+    kpis = {}
+
+    # Aggregate metrics across all media
+    metrics_summary = df.groupby('metric')['value'].sum().to_dict()
+
+    # Core metrics
+    total_impressions = metrics_summary.get('impressions', 0)
+    total_reach = metrics_summary.get('reach', 0)
+    total_interactions = metrics_summary.get('total_interactions', 0)
+    total_likes = metrics_summary.get('likes', 0)
+    total_comments = metrics_summary.get('comments', 0)
+    total_shares = metrics_summary.get('shares', 0)
+    total_saves = metrics_summary.get('saves', metrics_summary.get('saved', 0))
+
+    # Engagement rates
+    if follower_count and follower_count > 0:
+        kpis['engagement_rate_by_followers'] = (total_interactions / follower_count) * 100
+
+    if total_reach > 0:
+        kpis['engagement_rate_by_reach'] = (total_interactions / total_reach) * 100
+
+    if total_impressions > 0:
+        kpis['engagement_rate_by_impressions'] = (total_interactions / total_impressions) * 100
+        kpis['save_rate'] = (total_saves / total_impressions) * 100
+        kpis['comment_rate'] = (total_comments / total_impressions) * 100
+        kpis['share_rate'] = (total_shares / total_impressions) * 100
+
+    # Video metrics
+    total_video_views = metrics_summary.get('video_views', 0)
+    total_plays = metrics_summary.get('plays', 0)
+
+    if total_reach > 0 and total_video_views > 0:
+        kpis['video_view_rate'] = (total_video_views / total_reach) * 100
+
+    # Reels-specific KPIs
+    total_reels_plays = metrics_summary.get('ig_reels_plays', 0)
+    total_reels_watch_time = metrics_summary.get('ig_reels_video_view_total_time', 0)
+    avg_reels_watch_time = metrics_summary.get('ig_reels_avg_watch_time', 0)
+
+    if total_reels_plays > 0:
+        kpis['reels_completion_rate'] = (total_reels_watch_time / total_reels_plays) if total_reels_plays else 0
+
+    # Growth metrics
+    total_follows = metrics_summary.get('follows', 0)
+    total_profile_visits = metrics_summary.get('profile_visits', 0)
+
+    if total_impressions > 0:
+        kpis['profile_visit_rate'] = (total_profile_visits / total_impressions) * 100
+        kpis['follow_rate'] = (total_follows / total_impressions) * 100
+
+    # Summary totals
+    kpis.update({
+        'total_impressions': total_impressions,
+        'total_reach': total_reach,
+        'total_interactions': total_interactions,
+        'total_video_views': total_video_views,
+        'total_profile_visits': total_profile_visits,
+        'total_follows': total_follows,
+        'total_saves': total_saves,
+        'media_count': len(df['media_id'].unique()),
+        'follower_count': follower_count
+    })
+
+    return kpis
+
+# Legacy compatibility functions
+def get_cached_page_metrics():
+    """Legacy function for page metrics - kept for compatibility."""
+    return FALLBACK_PAGE_METRICS
+
+def fetch_page_insights(metrics: List[str] = None, since: str = None, until: str = None, period: str = "day") -> pd.DataFrame:
+    """Legacy page insights function - kept for compatibility."""
+    return pd.DataFrame()
+
+def get_organic_insights(date_preset: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None, 
+                        metrics: Optional[List[str]] = None, include_instagram: bool = True) -> pd.DataFrame:
+    """Legacy combined insights function - kept for compatibility."""
     validation = validate_organic_environment()
 
-    # Handle date range calculation
+    if not include_instagram or not validation['instagram_insights_enabled']:
+        return pd.DataFrame()
+
+    # Handle date range
     if date_preset and not (since and until):
-        since, until = calculate_date_range(date_preset)
-        logger.info(f"Using date preset '{date_preset}': {since} to {until}")
-    elif not (since and until):
-        logger.error("No valid date range specified")
-        return pd.DataFrame()
+        if date_preset == "yesterday":
+            yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+            since, until = yesterday, yesterday
+        elif date_preset == "last_7d":
+            end_date = date.today() - timedelta(days=1)
+            start_date = end_date - timedelta(days=6)
+            since = start_date.strftime("%Y-%m-%d")
+            until = end_date.strftime("%Y-%m-%d")
+        else:
+            yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+            since, until = yesterday, yesterday
 
-    # Get default metrics if none specified, then validate them
-    if not metrics:
-        # Get available Page metrics and select defaults (with fallback)
-        available_page_metrics = get_cached_page_metrics()
-        metrics = select_default_page_metrics(available_page_metrics)
+    ig_user_id = os.getenv('IG_USER_ID')
+    if ig_user_id:
+        return fetch_ig_media_insights(ig_user_id, since, until)
 
-    # Fetch Page insights
-    page_df = pd.DataFrame()
-    if validation['page_insights_enabled']:
-        logger.info(f"Fetching Page insights for {since} to {until}")
-        page_df = fetch_page_insights(metrics, since, until)
-    else:
-        logger.warning("Page insights disabled - missing PAGE_ACCESS_TOKEN or PAGE_ID")
-
-    # Fetch Instagram insights
-    ig_df = pd.DataFrame()
-    if include_instagram and validation['instagram_insights_enabled']:
-        logger.info(f"Fetching Instagram insights for {since} to {until}")
-        ig_user_id = os.getenv('IG_USER_ID')
-        ig_df = fetch_ig_media_insights(ig_user_id, since, until, DEFAULT_IG_METRICS)
-    elif include_instagram and validation['ig_user_id_available']:
-        logger.warning("Instagram insights disabled - missing PAGE_ACCESS_TOKEN")
-
-    # Combine Page and Instagram data
-    combined_data = []
-
-    if not page_df.empty:
-        page_df['source'] = 'facebook_page'
-        combined_data.append(page_df)
-
-    if not ig_df.empty:
-        ig_df['source'] = 'instagram'
-        combined_data.append(ig_df)
-
-    if combined_data:
-        result_df = pd.concat(combined_data, ignore_index=True)
-        logger.info(f"Combined organic insights: {len(result_df)} total records")
-        return result_df
-    else:
-        logger.warning("No organic insights data available")
-        return pd.DataFrame()
-
-def get_organic_performance_summary(date_preset: str = "last_7d") -> Dict:
-    """
-    Get summary metrics for organic performance.
-
-    Args:
-        date_preset: Date range preset
-
-    Returns:
-        Dict with summary metrics
-    """
-    df = get_organic_insights(date_preset=date_preset)
-
-    if df.empty:
-        return {
-            "total_reach": 0,
-            "total_impressions": 0,
-            "total_engagement": 0,
-            "avg_engagement_rate": 0.0
-        }
-
-    # Calculate summary metrics from available data
-    page_data = df[df['source'] == 'facebook_page'] if 'source' in df.columns else df
-
-    # Try different metric names based on what's available
-    total_reach = 0
-    total_impressions = 0
-    total_engagement = 0
-
-    if not page_data.empty:
-        # Try different reach metrics
-        reach_metrics = ['page_reach', 'page_impressions', 'page_views']
-        for metric in reach_metrics:
-            metric_data = page_data[page_data['metric'] == metric]['value'].sum()
-            if metric_data > 0:
-                total_reach = metric_data
-                break
-
-        # Try different impression metrics
-        impression_metrics = ['page_impressions_organic', 'page_impressions', 'page_views']
-        for metric in impression_metrics:
-            metric_data = page_data[page_data['metric'] == metric]['value'].sum()
-            if metric_data > 0:
-                total_impressions = metric_data
-                break
-
-        # Try engagement metrics
-        engagement_metrics = ['page_post_engagements', 'page_engaged_users']
-        for metric in engagement_metrics:
-            metric_data = page_data[page_data['metric'] == metric]['value'].sum()
-            if metric_data > 0:
-                total_engagement = metric_data
-                break
-
-    # Calculate engagement rate
-    avg_engagement_rate = (total_engagement / total_impressions * 100) if total_impressions > 0 else 0.0
-
-    summary = {
-        "total_reach": int(total_reach),
-        "total_impressions": int(total_impressions),
-        "total_engagement": int(total_engagement),
-        "avg_engagement_rate": round(avg_engagement_rate, 2)
-    }
-
-    logger.info(f"Organic performance summary: {summary}")
-    return summary
-
-# Enhanced preset mapping for date ranges
-ORGANIC_DATE_PRESETS = {
-    "latest": "Latest (Yesterday)",
-    "yesterday": "Yesterday", 
-    "last_7d": "Last 7 Days",
-    "last_30d": "Last 30 Days",
-    "this_month": "This Month",
-    "last_month": "Last Month",
-    "custom": "Custom Range"
-}
-
-# Export helper functions for dashboard use
-def get_available_page_metrics():
-    """Get list of available Page metrics for dashboard display."""
-    return get_cached_page_metrics()
-
-def get_valid_instagram_metrics():
-    """Get list of valid Instagram metrics for dashboard display."""
-    return sorted(list(VALID_IG_METRICS))
-
-def get_instagram_metrics_by_category():
-    """Get Instagram metrics organized by category for better dashboard display."""
-    return {
-        "Core Engagement": ["impressions", "reach", "likes", "comments", "shares", "saves", "total_interactions"],
-        "Video & Reels": ["plays", "video_views", "ig_reels_plays", "ig_reels_video_view_total_time", "ig_reels_avg_watch_time"],
-        "Reels Advanced": ["clips_replays_count", "ig_reels_aggregated_all_plays_count", "ig_reels_reach", "ig_reels_impressions"],
-        "Profile Activity": ["profile_visits", "follows", "website_clicks", "get_directions_clicks"],
-        "Story Metrics": ["taps_forward", "taps_back", "exits", "replies"],
-        "Other": ["navigation", "email_contacts", "phone_call_clicks"]
-    }
+    return pd.DataFrame()
 
 if __name__ == "__main__":
-    # Test metadata fetch with fallback
-    logger.info("🧪 Testing Page metrics metadata fetch with fallback...")
-    available = get_cached_page_metrics()
-    print(f"Available Page metrics metadata: {available}")
+    # Test enhanced Instagram insights
+    logger.info("🧪 Testing enhanced Instagram insights with metadata discovery...")
 
-    defaults = select_default_page_metrics(available)
-    print(f"Default Page metrics: {defaults}")
-
-    # Test latest Page insights
-    if defaults:
-        logger.info("🧪 Testing latest Page insights...")
-        df_latest = fetch_latest_page_insights(defaults)
-        print(f"Latest Page insights: {len(df_latest)} records")
-        if not df_latest.empty:
-            print(df_latest.head())
-
-    # Test Instagram metric discovery
     ig_id = os.getenv("IG_USER_ID")
     if ig_id:
-        logger.info("🧪 Testing Instagram metric discovery...")
-        try:
-            discovered = discover_ig_media_metrics(ig_id)
-            print(f"🔍 Discovered Instagram metrics: {discovered}")
-            
-            # Test with discovered metrics
-            logger.info("🧪 Testing latest Instagram insights with discovered metrics...")
-            df_ig = fetch_latest_ig_media_insights(ig_id, metrics=discovered[:3])
-            print(f"Latest IG insights: {len(df_ig)} records")
-            print("Columns:", df_ig.columns.tolist())
-        except Exception as e:
-            logger.error(f"Metric discovery test failed: {e}")
-            
-            # Fallback test
-            logger.info("🧪 Testing latest Instagram insights (fallback)...")
-            df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions", "reach", "total_interactions"])
-            print(f"Latest IG insights (fallback): {len(df_ig)} records")
+        # Test follower count
+        follower_count = get_ig_follower_count(ig_id)
+        print(f"📊 Follower count: {follower_count}")
 
-        if not df_ig.empty:
-            print("\nSample records:")
-            print(df_ig.head())
+        # Test latest insights
+        df = fetch_latest_ig_media_insights(ig_id)
+        print(f"📱 Latest insights: {len(df)} records")
 
-            # Test filtering by metric (long-format usage)
-            impressions_data = df_ig[df_ig['metric'] == 'impressions']
-            print(f"\nImpressions records: {len(impressions_data)}")
-            if not impressions_data.empty:
-                print(impressions_data[['media_id', 'value']])
+        if not df.empty:
+            print("📋 Columns:", df.columns.tolist())
+            print("📈 Available metrics:", sorted(df['metric'].unique()))
 
-            reach_data = df_ig[df_ig['metric'] == 'reach']
-            print(f"\nReach records: {len(reach_data)}")
+            # Test KPI computation
+            kpis = compute_instagram_kpis(df, follower_count)
+            print("🎯 Computed KPIs:", kpis)
 
-            # Show metrics per media example
-            media_ids = df_ig['media_id'].unique()
-            if len(media_ids) > 0:
-                first_media = media_ids[0]
-                media_metrics = df_ig[df_ig['media_id'] == first_media]
-                print(f"\nMetrics for media {first_media}:")
-                print(media_metrics[['metric', 'value', 'timestamp']])
-
-            # Example pivot for dashboard use
-            try:
-                pivot_example = df_ig.pivot_table(
-                    index='media_id', 
-                    columns='metric', 
-                    values='value', 
-                    aggfunc='first'
-                ).fillna(0)
-                print(f"\nPivot table example (media_id x metrics):")
-                print(pivot_example.head())
-            except Exception as e:
-                print(f"Pivot example failed: {e}")
-        else:
-            print("No Instagram insights data returned")
-
-    # Test combined organic insights
-    logger.info("🧪 Testing combined organic insights...")
-    combined_df = get_organic_insights(date_preset="yesterday")
-    print(f"Combined organic insights: {len(combined_df)} records")
-    if not combined_df.empty:
-        print(combined_df.head())
-
-    # Interactive REPL test snippet (uncomment to use)
-    """
-    # For interactive testing, set your tokens:
-    # os.environ["PAGE_ACCESS_TOKEN"] = "<your_page_token>"
-    # os.environ["IG_USER_ID"] = "<your_ig_user_id>"
-    # df_test = fetch_latest_ig_media_insights(os.getenv("IG_USER_ID"), metrics=["impressions","reach"])
-    # print(df_test.head())
-    # print("Columns:", df_test.columns.tolist())
-    """
+            # Show sample data
+            print("\n📊 Sample data:")
+            print(df.head(10))
+    else:
+        print("⚠️ IG_USER_ID not set - skipping tests")
