@@ -1,0 +1,414 @@
+ou are a senior Python engineer and Facebook/Instagram API expert working in a Replit environment with Streamlit. I need a single comprehensive prompt (with all code snippets and instructions in one block) that I can copy into my AI/Replit assistant to patch my code. The goal is to:
+
+1. Fetch paid campaign data including ad creative previews (images, text).
+2. Fetch Instagram media insights in long format including preview URLs and permalinks.
+3. Improve Streamlit UI: show actual creatives/posts instead of raw IDs, with readable charts.
+4. Include fallback logic for Page Insights metadata (if needed).
+5. Provide testing snippets.
+
+Below is the full prompt. Copy it entirely into your AI assistant so it can apply these patches:
+
+---
+You are a senior Python engineer and Facebook/Instagram API expert. Patch the code in Replit (Streamlit app) to implement the following:
+
+## 1. Paid campaign fetch with creative previews
+- In `fetch_paid.py` (or equivalent), after fetching campaign performance metrics, retrieve each campaign’s ads and their creatives:
+  1. Use Facebook Business SDK (`facebook_business`):
+     ```python
+     from facebook_business.adobjects.campaign import Campaign
+     from facebook_business.adobjects.ad import Ad
+     from facebook_business.adobjects.adcreative import AdCreative
+     ```
+  2. For each `campaign_id`, fetch its ads:
+     ```python
+     ads = Campaign(campaign_id).get_ads(fields=[
+         Ad.Field.id,
+         Ad.Field.name,
+         Ad.Field.creative
+     ])
+     ```
+  3. For each `ad` in `ads`:
+     - Extract `ad_id = ad[Ad.Field.id]`, `ad_name = ad[Ad.Field.name]`
+     - Get `creative_info = ad[Ad.Field.creative]` and `creative_id = creative_info.get('id')`
+     - If `creative_id` exists, fetch creative details:
+       ```python
+       creative = AdCreative(creative_id).api_get(fields=[
+           AdCreative.Field.name,          # creative name
+           AdCreative.Field.body,          # text/body
+           AdCreative.Field.title,         # title if available
+           AdCreative.Field.image_url,     # image preview URL
+           AdCreative.Field.thumbnail_url, # for videos
+           AdCreative.Field.object_url     # link or call-to-action URL
+       ])
+       ```
+     - Extract available fields: `creative_name`, `creative_body`, `creative_title`, `creative_image_url`, `creative_thumbnail_url`, `creative_object_url`. If a field is missing or None, handle gracefully (log warning and set to None).
+  4. Combine performance metrics and creative fields into a pandas DataFrame with columns:
+     ```
+     campaign_id,
+     campaign_name,
+     ad_id,
+     ad_name,
+     creative_id,
+     creative_name,
+     creative_body,
+     creative_title,
+     creative_image_url,
+     creative_thumbnail_url,
+     creative_object_url,
+     impressions,
+     clicks,
+     spend,
+     reach,
+     frequency,
+     ctr,
+     cpc,
+     date_start,
+     date_stop,
+     ...
+     ```
+  5. Logging: if fetching ads or creatives fails, log warning: 
+     ```python
+     logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
+     ```
+  6. Return the DataFrame for Streamlit to display.
+
+- Example snippet inside `fetch_paid.py` after you have campaign metrics DataFrame `df_campaigns`:
+  ```python
+  from facebook_business.adobjects.campaign import Campaign
+  from facebook_business.adobjects.ad import Ad
+  from facebook_business.adobjects.adcreative import AdCreative
+
+  def enrich_with_creatives(df_campaigns):
+      records = []
+      for _, row in df_campaigns.iterrows():
+          campaign_id = row['campaign_id']
+          campaign_name = row.get('campaign_name')
+          try:
+              ads = Campaign(campaign_id).get_ads(fields=[
+                  Ad.Field.id, Ad.Field.name, Ad.Field.creative
+              ])
+          except Exception as e:
+              logger.warning(f"Failed to fetch ads for campaign {campaign_id}: {e}")
+              continue
+          for ad in ads:
+              ad_id = ad.get(Ad.Field.id)
+              ad_name = ad.get(Ad.Field.name)
+              creative_id = None
+              creative_name = creative_body = creative_title = None
+              creative_image_url = creative_thumbnail_url = creative_object_url = None
+              creative_info = ad.get(Ad.Field.creative)
+              if creative_info:
+                  creative_id = creative_info.get('id')
+                  if creative_id:
+                      try:
+                          creative = AdCreative(creative_id).api_get(fields=[
+                              AdCreative.Field.name,
+                              AdCreative.Field.body,
+                              AdCreative.Field.title,
+                              AdCreative.Field.image_url,
+                              AdCreative.Field.thumbnail_url,
+                              AdCreative.Field.object_url
+                          ])
+                          creative_name = creative.get(AdCreative.Field.name)
+                          creative_body = creative.get(AdCreative.Field.body)
+                          creative_title = creative.get(AdCreative.Field.title)
+                          creative_image_url = creative.get(AdCreative.Field.image_url)
+                          creative_thumbnail_url = creative.get(AdCreative.Field.thumbnail_url)
+                          creative_object_url = creative.get(AdCreative.Field.object_url)
+                      except Exception as e:
+                          logger.warning(f"Failed to fetch creative details for creative {creative_id}: {e}")
+              # Merge with performance row
+              record = {
+                  "campaign_id": campaign_id,
+                  "campaign_name": campaign_name,
+                  "ad_id": ad_id,
+                  "ad_name": ad_name,
+                  "creative_id": creative_id,
+                  "creative_name": creative_name,
+                  "creative_body": creative_body,
+                  "creative_title": creative_title,
+                  "creative_image_url": creative_image_url,
+                  "creative_thumbnail_url": creative_thumbnail_url,
+                  "creative_object_url": creative_object_url,
+              }
+              # Copy performance metrics from row
+              for col in ['impressions','clicks','spend','reach','frequency','ctr','cpc','date_start','date_stop']:
+                  record[col] = row.get(col)
+              records.append(record)
+      if not records:
+          return pd.DataFrame(columns=[
+              "campaign_id","campaign_name","ad_id","ad_name","creative_id","creative_name",
+              "creative_body","creative_title","creative_image_url","creative_thumbnail_url",
+              "creative_object_url","impressions","clicks","spend","reach","frequency","ctr","cpc",
+              "date_start","date_stop"
+          ])
+      return pd.DataFrame(records)
+In your main paid-fetch flow:
+df_campaigns = get_campaign_performance(...)  # existing function
+df_enriched = enrich_with_creatives(df_campaigns)
+return df_enriched
+2. Instagram media insights in long format with preview URLs
+
+In fetch_organic.py (or appropriate module), patch fetch_ig_media_insights to:
+Use constants:
+import os, logging, requests, pandas as pd
+from datetime import datetime, date, timedelta
+
+logger = logging.getLogger(__name__)
+GRAPH_API_VERSION = "v23.0"
+GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+VALID_IG_METRICS = {
+    "impressions","reach","replies","saved","video_views","likes","comments",
+    "shares","plays","total_interactions","follows","profile_visits",
+    "profile_activity","navigation","ig_reels_video_view_total_time",
+    "ig_reels_avg_watch_time","clips_replays_count","ig_reels_aggregated_all_plays_count","views"
+}
+Fetch media list with preview fields:
+url_media = f"{GRAPH_API_BASE}/{ig_user_id}/media"
+params_media = {
+    "fields": "id,caption,timestamp,media_type,media_product_type,media_url,permalink,thumbnail_url",
+    "access_token": token,
+    "limit": 100
+}
+This returns for each media: id, caption, timestamp, media_type, media_product_type, media_url (image or video URL), permalink, and thumbnail_url (for videos).
+For each media in date range (since, until as “YYYY-MM-DD”):
+Filter by timestamp.split("T")[0] between since/until.
+Start with metrics_for_media = metrics or ["impressions","reach","total_interactions"].
+Filter against VALID_IG_METRICS; if empty, return empty DataFrame with columns ['media_id','timestamp','caption','media_url','permalink','thumbnail_url','metric','value'].
+Attempt insights fetch:
+while metrics_for_media:
+    metric_str = ",".join(metrics_for_media)
+    url_ins = f"{GRAPH_API_BASE}/{media_id}/insights"
+    params_ins = {"metric": metric_str, "access_token": token}
+    resp_ins = requests.get(url_ins, params=params_ins)
+    body_ins = resp_ins.json() if resp_ins.headers.get('Content-Type','').startswith('application/json') else {"error":"Non-JSON"}
+    if resp_ins.status_code == 200 and "data" in body_ins:
+        for mobj in body_ins.get("data", []):
+            name = mobj.get("name")
+            vals = mobj.get("values", [])
+            if vals:
+                value = vals[-1].get("value")
+                records.append({
+                    "media_id": media_id,
+                    "timestamp": ts,
+                    "caption": caption,
+                    "media_url": media_url,
+                    "permalink": permalink,
+                    "thumbnail_url": thumbnail_url,
+                    "metric": name,
+                    "value": value
+                })
+        break
+    if resp_ins.status_code == 400 and "error" in body_ins:
+        msg = body_ins["error"].get("message","")
+        unsupported = None
+        for m in metrics_for_media:
+            if m in msg:
+                unsupported = m
+                break
+        if unsupported:
+            metrics_for_media.remove(unsupported)
+            logger.info(f"Media {media_id}: removed unsupported metric '{unsupported}' and retrying")
+            continue
+    logger.warning(f"fetch_ig_media_insights: Insights fetch error for media {media_id}: status {resp_ins.status_code}, response: {body_ins}")
+    break
+After loop, if records is empty, return pd.DataFrame(columns=['media_id','timestamp','caption','media_url','permalink','thumbnail_url','metric','value']).
+Else return pd.DataFrame(records).
+Add helper:
+def fetch_latest_ig_media_insights(ig_user_id, metrics=None):
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    logger.info(f"Fetching latest Instagram insights for date: {yesterday}")
+    return fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday, metrics=metrics)
+Include a test snippet at bottom:
+if __name__ == "__main__":
+    import os
+    os.environ["PAGE_ACCESS_TOKEN"] = "<your_page_token>"
+    os.environ["IG_USER_ID"] = "<your_ig_user_id>"
+    df_test = fetch_latest_ig_media_insights(os.getenv("IG_USER_ID"), metrics=["impressions","reach"])
+    print(df_test.head())
+    print("Columns:", df_test.columns.tolist())
+3. Fallback logic for Page Insights metadata (if used elsewhere)
+
+At module top (e.g., in fetch_organic.py):
+import os, requests, logging
+logger = logging.getLogger(__name__)
+GRAPH_API_VERSION = "v23.0"
+GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+_cached_page_metrics = None
+_metadata_fetch_failed = False
+FALLBACK_PAGE_METRICS = ["page_impressions", "page_engaged_users", "page_reach"]
+Helper:
+def get_cached_page_metrics():
+    global _cached_page_metrics, _metadata_fetch_failed
+    if _cached_page_metrics is not None:
+        return _cached_page_metrics
+    if _metadata_fetch_failed:
+        logger.info("Using fallback Page metrics (metadata previously failed)")
+        _cached_page_metrics = FALLBACK_PAGE_METRICS
+        return _cached_page_metrics
+    page_id = os.getenv("PAGE_ID")
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    url = f"{GRAPH_API_BASE}/{page_id}/insights/metadata"
+    logger.info(f"Fetching Page insights metadata from: {url}")
+    try:
+        resp = requests.get(url, params={"access_token": token})
+        body = resp.json() if resp.headers.get('Content-Type','').startswith('application/json') else {"error":"Non-JSON"}
+        if resp.status_code != 200 or "error" in body:
+            logger.error(f"Page insights metadata error: status {resp.status_code}, response JSON: {body}")
+            _metadata_fetch_failed = True
+            _cached_page_metrics = FALLBACK_PAGE_METRICS
+            logger.warning(f"Using fallback Page metrics: {_cached_page_metrics}")
+        else:
+            data = body.get("data", [])
+            metric_names = [item.get("name") for item in data if item.get("name")]
+            logger.info(f"Fetched {len(metric_names)} Page metrics metadata: {metric_names[:10]} ...")
+            _cached_page_metrics = metric_names
+        return _cached_page_metrics
+    except Exception as e:
+        logger.error(f"Exception fetching Page metadata: {e}", exc_info=True)
+        _metadata_fetch_failed = True
+        _cached_page_metrics = FALLBACK_PAGE_METRICS
+        logger.warning(f"Using fallback Page metrics: {_cached_page_metrics}")
+        return _cached_page_metrics
+In fetch_page_insights(metrics, since, until, period="day"), call available = get_cached_page_metrics(), filter metrics or pick defaults via:
+def select_default_page_metrics(available_metrics):
+    candidates = ["page_impressions_organic","page_impressions_paid","page_engaged_users","page_reach","page_post_engagements"]
+    selected = [m for m in candidates if m in available_metrics]
+    skipped = [m for m in candidates if m not in available_metrics]
+    logger.info(f"Default Page metrics selected: {selected}")
+    if skipped:
+        logger.debug(f"Skipped unavailable Page metrics: {skipped}")
+    return selected
+Then fetch with filtered metrics; if empty, return empty DataFrame. This ensures no endless metadata failures.
+4. Streamlit UI patches
+
+4.1 Paid campaigns UI
+After receiving df_enriched from paid fetch (with creative_image_url, creative_thumbnail_url, creative_body/title):
+import streamlit as st
+import matplotlib.pyplot as plt
+
+st.header("Paid Campaigns")
+# Maybe allow date preset selection, then:
+df_paid = fetch_paid_with_creatives(...)  # returns enriched DataFrame
+if df_paid.empty:
+    st.warning("No paid ad data for selected range.")
+else:
+    # Show summary metrics:
+    total_spend = df_paid['spend'].sum()
+    total_impr = df_paid['impressions'].sum()
+    total_clicks = df_paid['clicks'].sum()
+    avg_ctr = (df_paid['clicks'].sum() / df_paid['impressions'].sum()) if df_paid['impressions'].sum() else 0
+    st.metric("Total Spend", f"${total_spend:,.2f}")
+    st.metric("Total Impressions", f"{int(total_impr):,}")
+    st.metric("Total Clicks", f"{int(total_clicks):,}")
+    st.metric("Avg CTR", f"{avg_ctr:.2%}")
+    # Show bar chart of spend by campaign name:
+    fig, ax = plt.subplots(figsize=(10, 4))
+    campaign_sums = df_paid.groupby('campaign_name')['spend'].sum().reset_index()
+    ax.bar(campaign_sums['campaign_name'], campaign_sums['spend'])
+    ax.set_xlabel("Campaign")
+    ax.set_ylabel("Spend")
+    ax.set_title("Campaign Spend")
+    plt.xticks(rotation=45, ha='right')
+    st.pyplot(fig)
+    st.markdown("---")
+    # Show each ad creative preview
+    st.subheader("Ad Creative Previews")
+    for _, row in df_paid.iterrows():
+        st.markdown(f"**Campaign:** {row['campaign_name']}  •  **Ad:** {row['ad_name']}")
+        img_url = row.get('creative_image_url') or row.get('creative_thumbnail_url')
+        if img_url:
+            st.image(img_url, width=300)
+        if row.get('creative_title'):
+            st.write(f"**Title:** {row['creative_title']}")
+        if row.get('creative_body'):
+            st.write(row['creative_body'])
+        # Key metrics
+        st.write(f"Impressions: {row.get('impressions',0)}, Clicks: {row.get('clicks',0)}, Spend: ${row.get('spend',0):.2f}, CTR: {row.get('ctr',0):.2%}, CPC: ${row.get('cpc',0):.2f}")
+        if row.get('creative_object_url'):
+            st.markdown(f"[View Ad Destination]({row['creative_object_url']})")
+        st.markdown("---")
+4.2 Instagram UI
+After obtaining ig_data long-format with preview fields:
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import date, timedelta
+
+st.header("Instagram Media Insights")
+ig_user_id = os.getenv("IG_USER_ID")
+if not ig_user_id:
+    st.info("IG_USER_ID not set: Instagram insights disabled.")
+else:
+    # Select date range or “Latest Instagram Only” button
+    # Example: last 7 days
+    since = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+    until = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    ig_data = fetch_ig_media_insights(ig_user_id, since=since, until=until, metrics=["impressions","reach","total_interactions"])
+    if ig_data.empty:
+        st.warning(f"No Instagram insights for {since} to {until}.")
+    else:
+        # Show available metrics info
+        unique_metrics = ig_data['metric'].unique().tolist()
+        st.info(f"Available metrics: {', '.join(unique_metrics)}")
+        # Build unique media list with labels
+        ig_unique = ig_data[['media_id','timestamp','caption','media_url','permalink','thumbnail_url']].drop_duplicates(subset=['media_id'])
+        labels = {
+            row['media_id']: f"{row['timestamp'].split('T')[0]}: {row['caption'][:30]}..."
+            for _, row in ig_unique.iterrows()
+        }
+        selection = st.selectbox("Select post to inspect", options=list(labels.keys()), format_func=lambda mid: labels[mid])
+        sel_row = ig_unique[ig_unique['media_id'] == selection].iloc[0]
+        img_url = sel_row.get('media_url') or sel_row.get('thumbnail_url')
+        if img_url:
+            st.image(img_url, width=400)
+        st.markdown(f"[View on Instagram]({sel_row.get('permalink')})")
+        sel_metrics = ig_data[ig_data['media_id'] == selection][['metric','value']]
+        st.subheader("Metrics for this post")
+        st.dataframe(sel_metrics.set_index('metric'))
+        # Bar chart of metrics for this post
+        fig, ax = plt.subplots(figsize=(6,4))
+        ax.bar(sel_metrics['metric'], sel_metrics['value'])
+        ax.set_xlabel("Metric")
+        ax.set_ylabel("Value")
+        ax.set_title("Post Metrics")
+        plt.xticks(rotation=45, ha='right')
+        st.pyplot(fig)
+        st.markdown("---")
+        # Aggregate over time chart
+        ig_data['date'] = pd.to_datetime(ig_data['timestamp']).dt.date.astype(str)
+        df_pivot = ig_data.pivot_table(index='date', columns='metric', values='value', aggfunc='sum').reset_index()
+        fig2, ax2 = plt.subplots(figsize=(10,5))
+        if 'impressions' in df_pivot:
+            ax2.plot(df_pivot['date'], df_pivot['impressions'], marker='o', label='Impressions')
+        if 'reach' in df_pivot:
+            ax2.plot(df_pivot['date'], df_pivot['reach'], marker='o', label='Reach')
+        ax2.set_xlabel("Date")
+        ax2.set_ylabel("Value")
+        ax2.set_title("Instagram Impressions & Reach Over Time")
+        plt.xticks(rotation=45, ha='right')
+        ax2.legend()
+        st.pyplot(fig2)
+5. Testing and validation
+
+Add at bottom of each module a if __name__ == "__main__": test snippet:
+For paid: simulate environment variables (AD_ACCOUNT_ID, META_ACCESS_TOKEN, etc.), call the paid fetch/enrich functions, print DataFrame head and columns.
+For organic: set PAGE_ACCESS_TOKEN, IG_USER_ID, call fetch_latest_ig_media_insights, print head and columns.
+Verify images load in Streamlit: if Replit cannot render external images, ensure the URLs are accessible publicly.
+6. Comments & references
+
+In code comments, reference official docs:
+Facebook AdCreative: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/
+Instagram Media: https://developers.facebook.com/docs/instagram-api/reference/media
+Graph API Insights: https://developers.facebook.com/docs/graph-api/reference/page/insights/
+Use conversational but precise comments, e.g.:
+# Fetch Instagram media list including preview URLs
+# Official docs: https://developers.facebook.com/docs/instagram-api/reference/media
+Keep logging for debugging: log successes and warnings when preview URLs are missing or fetch fails.
+7. Final instructions
+
+Paste this entire block into your AI/Replit assistant to generate or patch code files.
+After patching, manually test in Graph API Explorer for any unsupported fields.
+Adjust API version if necessary.
+Ensure Replit secrets/environment variables are set: PAGE_ACCESS_TOKEN, IG_USER_ID, AD_ACCOUNT_ID, META_ACCESS_TOKEN, META_APP_ID, META_APP_SECRET, OPENAI_API_KEY, etc.
+Use Streamlit in “dark mode” layout: the code above uses matplotlib with appropriate figsize and rotated labels for readability.
