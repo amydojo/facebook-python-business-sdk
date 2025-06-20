@@ -1,6 +1,6 @@
 
-# Shim for Python 3.12 so Streamlit can import distutils.spawn.find_executable
-setuptools-distutils
+# Fix for Python 3.12 - setuptools includes distutils replacement
+setuptools>=69.0.0
 
 # Pin facebook-business to stable version compatible with Graph API
 facebook-business==18.0.0

@@ -1,10 +1,9 @@
-
 # Streamlit config for Replit/Python 3.12: headless mode stops open_browser attempt that imports distutils
 # Official docs: https://docs.streamlit.io/library/advanced-features/configuration
 
 [server]
-headless = true          # prevents Streamlit from opening browser
-enableCORS = false       # avoid CORS issues in Replit
+headless = true
+enableCORS = false
 port = 5000
 address = "0.0.0.0"
 
