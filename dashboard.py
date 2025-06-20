@@ -292,6 +292,11 @@ def show_advanced_instagram_analytics():
                 
                 st.success(f"✅ Fetched {len(df)} insights records from {len(df['media_id'].unique())} posts")
                 
+            except Exception as e:
+                st.error(f"❌ Error fetching Instagram data: {e}")
+                logger.error(f"Error in Instagram data fetch: {e}", exc_info=True)
+                return
+                
     # Check if we have data to display
     if 'ig_data' not in st.session_state:
         st.info("👆 Click 'Fetch Instagram Data' to load analytics")
