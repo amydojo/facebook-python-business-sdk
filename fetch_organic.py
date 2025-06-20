@@ -317,8 +317,10 @@ def fetch_latest_page_insights(metrics: List[str] = None, period: str = "day") -
 
 def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until: Optional[str] = None, metrics: Optional[List[str]] = None) -> pd.DataFrame:
     """
-    Fetch Instagram media insights with per-media retry logic for unsupported metrics.
-
+    Fetch Instagram media insights in long-format DataFrame with robust error handling.
+    
+    Official docs: https://developers.facebook.com/docs/instagram-api/guides/insights/
+    
     Args:
         ig_user_id: Instagram Business User ID
         since: Start date in YYYY-MM-DD format (optional)
@@ -326,27 +328,28 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
         metrics: List of metrics (optional, defaults to safe subset)
 
     Returns:
-        DataFrame with Instagram insights data
+        DataFrame with columns ['media_id', 'timestamp', 'caption', 'metric', 'value']
+        Returns empty DataFrame with correct columns if fetch fails
     """
     token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
     
     if not ig_user_id or not token:
         logger.error("fetch_ig_media_insights: Missing IG_USER_ID or token.")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'metric', 'value'])
     
-    # Determine initial metrics
-    default = ["impressions", "reach", "total_interactions"]
-    req_metrics = metrics or default
+    # Determine initial metrics - default to safe subset
+    default_metrics = ["impressions", "reach", "total_interactions"]
+    req_metrics = metrics or default_metrics
     
     # Filter against VALID_IG_METRICS
     valid_initial = [m for m in req_metrics if m in VALID_IG_METRICS]
     if not valid_initial:
         logger.error(f"No valid IG metrics in requested {req_metrics}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'metric', 'value'])
     
     logger.info(f"Initial valid Instagram metrics: {valid_initial}")
     
-    # Fetch media list
+    # Fetch media list via Graph API
     url_media = f"{GRAPH_API_BASE}/{ig_user_id}/media"
     params_media = {
         "fields": "id,caption,timestamp,media_type,media_product_type",
@@ -363,25 +366,26 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
         
         if resp_media.status_code != 200 or "error" in body_media:
             logger.error(f"Error fetching IG media list: status {resp_media.status_code}, response: {body_media}")
-            return pd.DataFrame()
+            return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'metric', 'value'])
         
         media_data = body_media.get("data", [])
         logger.info(f"Found {len(media_data)} Instagram media items")
         
     except Exception as e:
         logger.error(f"fetch_ig_media_insights: Exception fetching media list: {e}", exc_info=True)
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'metric', 'value'])
 
     records = []
     
     for media in media_data:
         media_id = media.get("id")
-        ts = media.get("timestamp", "")
+        timestamp_str = media.get("timestamp", "")
+        caption = media.get("caption", "")
         
-        # Filter by date
+        # Filter by date range if specified
         if since or until:
             try:
-                media_date = ts.split("T")[0]  # Extract YYYY-MM-DD part
+                media_date = timestamp_str.split("T")[0]  # Extract YYYY-MM-DD part
             except:
                 media_date = None
             
@@ -390,65 +394,70 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
             if until and media_date and media_date > until:
                 continue
         
-        # For this media, start with valid_initial
+        # Per-media retry logic: start with all valid metrics, remove unsupported ones
         metrics_for_media = list(valid_initial)
-        success = False
         
-        # Retry logic for removing unsupported metrics
         while metrics_for_media:
             metric_str = ",".join(metrics_for_media)
-            url_ins = f"{GRAPH_API_BASE}/{media_id}/insights"
-            params_ins = {"metric": metric_str, "access_token": token}
+            url_insights = f"{GRAPH_API_BASE}/{media_id}/insights"
+            params_insights = {"metric": metric_str, "access_token": token}
             
             try:
-                resp_ins = requests.get(url_ins, params=params_ins)
+                resp_insights = requests.get(url_insights, params=params_insights)
                 try:
-                    body_ins = resp_ins.json()
+                    body_insights = resp_insights.json()
                 except ValueError:
-                    body_ins = {"error": "Non-JSON response"}
+                    body_insights = {"error": "Non-JSON response"}
                 
-                if resp_ins.status_code == 200 and "data" in body_ins:
-                    # Success - parse the insights
-                    row = {
-                        "media_id": media_id,
-                        "date": datetime.fromisoformat(ts.replace('Z', '+00:00')).date(),
-                        "media_type": media.get("media_type"),
-                        "caption": media.get("caption", "")[:100] + "..." if len(media.get("caption", "")) > 100 else media.get("caption", "")
-                    }
+                if resp_insights.status_code == 200 and "data" in body_insights:
+                    # Success - extract each metric's value and create long-format records
+                    for metric_obj in body_insights.get("data", []):
+                        metric_name = metric_obj.get("name")
+                        values_list = metric_obj.get("values", [])
+                        
+                        if values_list:
+                            # Use the last (most recent) value
+                            metric_value = values_list[-1].get("value", 0)
+                            
+                            records.append({
+                                "media_id": media_id,
+                                "timestamp": timestamp_str,
+                                "caption": caption[:100] + "..." if len(caption) > 100 else caption,
+                                "metric": metric_name,
+                                "value": metric_value
+                            })
                     
-                    for mobj in body_ins.get("data", []):
-                        name = mobj.get("name")
-                        vals = mobj.get("values", [])
-                        if vals:
-                            row[name] = vals[-1].get("value", 0)
-                    
-                    records.append(row)
-                    success = True
-                    break
+                    break  # Successfully processed this media
                 
-                # If 400 with unsupported metric, parse and retry
-                if resp_ins.status_code == 400 and "error" in body_ins:
-                    msg = body_ins["error"].get("message", "")
+                # Handle 400 error indicating unsupported metric for this media type
+                elif resp_insights.status_code == 400 and "error" in body_insights:
+                    error_msg = body_insights["error"].get("message", "")
                     
-                    # Try to extract metric name from error message
-                    # e.g., "... does not support the impressions metric ..."
-                    unsupported = None
-                    for m in metrics_for_media:
-                        if m in msg:
-                            unsupported = m
+                    # Try to detect which metric caused the error by checking if metric name appears in error message
+                    # e.g., "Media does not support the impressions metric for this media product type"
+                    unsupported_metric = None
+                    for metric in metrics_for_media:
+                        if metric in error_msg:
+                            unsupported_metric = metric
                             break
                     
-                    if unsupported:
-                        metrics_for_media.remove(unsupported)
-                        logger.info(f"Media {media_id}: removed unsupported metric '{unsupported}' and retrying")
+                    if unsupported_metric:
+                        metrics_for_media.remove(unsupported_metric)
+                        logger.info(f"Media {media_id}: removed unsupported metric '{unsupported_metric}' and retrying with {len(metrics_for_media)} remaining")
+                        
                         if not metrics_for_media:
                             logger.warning(f"Media {media_id}: no metrics left after removing unsupported ones, skipping")
                             break
                         continue
+                    else:
+                        # Couldn't identify the problematic metric, skip this media
+                        logger.warning(f"Media {media_id}: Could not identify unsupported metric from error: {error_msg}")
+                        break
                 
-                # Other error or cannot recover
-                logger.warning(f"Instagram insights fetch error for media {media_id}: status {resp_ins.status_code}, response JSON: {body_ins}")
-                break
+                else:
+                    # Other error, skip this media
+                    logger.warning(f"Instagram insights fetch error for media {media_id}: status {resp_insights.status_code}, response: {body_insights}")
+                    break
                 
             except Exception as e:
                 logger.error(f"Error fetching insights for media {media_id}: {e}")
@@ -456,22 +465,22 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
 
     if not records:
         logger.info("fetch_ig_media_insights: No media insights returned")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'metric', 'value'])
     
     df = pd.DataFrame(records)
-    logger.info(f"Successfully fetched {len(df)} Instagram insights records")
+    logger.info(f"Successfully fetched {len(df)} Instagram insights records in long format")
     return df
 
 def fetch_latest_ig_media_insights(ig_user_id: str, metrics: Optional[List[str]] = None) -> pd.DataFrame:
     """
-    Fetch latest (yesterday's) Instagram media insights.
+    Fetch latest (yesterday's) Instagram media insights in long-format.
     
     Args:
         ig_user_id: Instagram Business User ID
-        metrics: List of metrics (optional)
+        metrics: List of metrics (optional, defaults to safe subset)
     
     Returns:
-        DataFrame with latest Instagram insights data
+        DataFrame with columns ['media_id', 'timestamp', 'caption', 'metric', 'value']
     """
     yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     logger.info(f"Fetching latest Instagram insights for date: {yesterday}")
@@ -646,14 +655,49 @@ if __name__ == "__main__":
         if not df_latest.empty:
             print(df_latest.head())
     
-    # Test Instagram latest
+    # Test Instagram latest with comprehensive example
     ig_id = os.getenv("IG_USER_ID")
     if ig_id:
-        logger.info("🧪 Testing latest Instagram insights...")
-        df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions", "reach"])
+        logger.info("🧪 Testing latest Instagram insights (long-format)...")
+        df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions", "reach", "total_interactions"])
         print(f"Latest IG insights: {len(df_ig)} records")
+        print("Columns:", df_ig.columns.tolist())
+        
         if not df_ig.empty:
+            print("\nSample records:")
             print(df_ig.head())
+            
+            # Test filtering by metric (long-format usage)
+            impressions_data = df_ig[df_ig['metric'] == 'impressions']
+            print(f"\nImpressions records: {len(impressions_data)}")
+            if not impressions_data.empty:
+                print(impressions_data[['media_id', 'value']])
+            
+            reach_data = df_ig[df_ig['metric'] == 'reach']
+            print(f"\nReach records: {len(reach_data)}")
+            
+            # Show metrics per media example
+            media_ids = df_ig['media_id'].unique()
+            if len(media_ids) > 0:
+                first_media = media_ids[0]
+                media_metrics = df_ig[df_ig['media_id'] == first_media]
+                print(f"\nMetrics for media {first_media}:")
+                print(media_metrics[['metric', 'value', 'timestamp']])
+            
+            # Example pivot for dashboard use
+            try:
+                pivot_example = df_ig.pivot_table(
+                    index='media_id', 
+                    columns='metric', 
+                    values='value', 
+                    aggfunc='first'
+                ).fillna(0)
+                print(f"\nPivot table example (media_id x metrics):")
+                print(pivot_example.head())
+            except Exception as e:
+                print(f"Pivot example failed: {e}")
+        else:
+            print("No Instagram insights data returned")
     
     # Test combined organic insights
     logger.info("🧪 Testing combined organic insights...")
@@ -661,3 +705,13 @@ if __name__ == "__main__":
     print(f"Combined organic insights: {len(combined_df)} records")
     if not combined_df.empty:
         print(combined_df.head())
+    
+    # Interactive REPL test snippet (uncomment to use)
+    """
+    # For interactive testing, set your tokens:
+    # os.environ["PAGE_ACCESS_TOKEN"] = "<your_page_token>"
+    # os.environ["IG_USER_ID"] = "<your_ig_user_id>"
+    # df_test = fetch_latest_ig_media_insights(os.getenv("IG_USER_ID"), metrics=["impressions","reach"])
+    # print(df_test.head())
+    # print("Columns:", df_test.columns.tolist())
+    """
