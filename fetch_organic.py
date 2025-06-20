@@ -1,22 +1,18 @@
 """
 Fetch organic insights from Facebook Pages and Instagram.
-References:
-- Page Insights: https://developers.facebook.com/docs/graph-api/reference/page/insights/
-- Instagram Graph API: https://developers.facebook.com/docs/instagram-api/
+Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
 """
 import logging
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
-from config import config
-from facebook_business.api import FacebookAdsApi
-from facebook_business.adobjects.page import Page
+import os
 
 logger = logging.getLogger(__name__)
 
 def fetch_page_insights(metrics=None, since=None, until=None, period='day'):
     """
-    Fetch Facebook Page insights.
+    Fetch Facebook Page insights using Graph API.
 
     Args:
         metrics: list of metrics to fetch
@@ -27,10 +23,13 @@ def fetch_page_insights(metrics=None, since=None, until=None, period='day'):
     Returns:
         pandas.DataFrame with page insights
 
-    Reference: GET /{PAGE_ID}/insights?metric=...&period=...&since=...&until=...
+    Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
     """
-    if not config.PAGE_ID or not config.META_ACCESS_TOKEN:
-        logger.error("PAGE_ID or META_ACCESS_TOKEN not configured")
+    page_id = os.getenv("PAGE_ID")
+    access_token = os.getenv("META_ACCESS_TOKEN")
+
+    if not page_id or not access_token:
+        logger.error("❌ PAGE_ID or META_ACCESS_TOKEN not configured")
         return pd.DataFrame()
 
     # Default metrics if none provided
@@ -50,18 +49,19 @@ def fetch_page_insights(metrics=None, since=None, until=None, period='day'):
 
     try:
         all_data = []
+        api_version = "v18.0"
 
         # Fetch each metric separately (API limitation)
         for metric in metrics:
-            logger.info(f"Fetching page metric: {metric}")
+            logger.info(f"🔍 Fetching page metric: {metric}")
 
-            url = f"https://graph.facebook.com/{config.GRAPH_API_VERSION}/{config.PAGE_ID}/insights"
+            url = f"https://graph.facebook.com/{api_version}/{page_id}/insights"
             params = {
                 'metric': metric,
                 'period': period,
                 'since': since,
                 'until': until,
-                'access_token': config.META_ACCESS_TOKEN
+                'access_token': access_token
             }
 
             response = requests.get(url, params=params)
@@ -83,7 +83,7 @@ def fetch_page_insights(metrics=None, since=None, until=None, period='day'):
                         all_data.append(row)
 
         if not all_data:
-            logger.warning("No page insights data returned")
+            logger.warning("⚠️ No page insights data returned")
             return pd.DataFrame()
 
         df = pd.DataFrame(all_data)
@@ -95,14 +95,14 @@ def fetch_page_insights(metrics=None, since=None, until=None, period='day'):
         # Pivot to have metrics as columns
         df_pivot = df.pivot(index='date', columns='metric', values='value').reset_index()
 
-        logger.info(f"Successfully fetched page insights for {len(df_pivot)} days")
+        logger.info(f"✅ Successfully fetched page insights for {len(df_pivot)} days")
         return df_pivot
 
     except requests.RequestException as e:
-        logger.error(f"Error fetching page insights: {e}")
+        logger.error(f"❌ Error fetching page insights: {e}", exc_info=True)
         return pd.DataFrame()
     except Exception as e:
-        logger.error(f"Unexpected error fetching page insights: {e}")
+        logger.error(f"❌ Unexpected error fetching page insights: {e}", exc_info=True)
         return pd.DataFrame()
 
 def fetch_page_posts(limit=25):
@@ -115,18 +115,22 @@ def fetch_page_posts(limit=25):
     Returns:
         pandas.DataFrame with post data
 
-    Reference: GET /{PAGE_ID}/posts?fields=id,created_time,message,story
+    Official docs: https://developers.facebook.com/docs/graph-api/reference/page/posts
     """
-    if not config.PAGE_ID or not config.META_ACCESS_TOKEN:
-        logger.error("PAGE_ID or META_ACCESS_TOKEN not configured")
+    page_id = os.getenv("PAGE_ID")
+    access_token = os.getenv("META_ACCESS_TOKEN")
+
+    if not page_id or not access_token:
+        logger.error("❌ PAGE_ID or META_ACCESS_TOKEN not configured")
         return pd.DataFrame()
 
     try:
-        url = f"https://graph.facebook.com/{config.GRAPH_API_VERSION}/{config.PAGE_ID}/posts"
+        api_version = "v18.0"
+        url = f"https://graph.facebook.com/{api_version}/{page_id}/posts"
         params = {
             'fields': 'id,created_time,message,story,type,permalink_url',
             'limit': limit,
-            'access_token': config.META_ACCESS_TOKEN
+            'access_token': access_token
         }
 
         response = requests.get(url, params=params)
@@ -135,7 +139,7 @@ def fetch_page_posts(limit=25):
         data = response.json()
 
         if 'data' not in data or not data['data']:
-            logger.warning("No posts found")
+            logger.warning("⚠️ No posts found")
             return pd.DataFrame()
 
         df = pd.DataFrame(data['data'])
@@ -144,253 +148,62 @@ def fetch_page_posts(limit=25):
         if 'created_time' in df.columns:
             df['created_time'] = pd.to_datetime(df['created_time'])
 
-        logger.info(f"Successfully fetched {len(df)} posts")
+        logger.info(f"✅ Successfully fetched {len(df)} posts")
         return df
 
     except requests.RequestException as e:
-        logger.error(f"Error fetching page posts: {e}")
+        logger.error(f"❌ Error fetching page posts: {e}", exc_info=True)
         return pd.DataFrame()
     except Exception as e:
-        logger.error(f"Unexpected error fetching page posts: {e}")
+        logger.error(f"❌ Unexpected error fetching page posts: {e}", exc_info=True)
         return pd.DataFrame()
 
-def fetch_post_insights(post_id, metrics=None, since=None, until=None, period='lifetime'):
+def get_organic_insights(date_preset=None, since=None, until=None, metrics=None):
     """
-    Fetch insights for a specific post.
+    Wrapper to fetch organic page insights with preset date ranges.
 
     Args:
-        post_id: Facebook post ID
-        metrics: list of metrics to fetch
-        since: start date (YYYY-MM-DD)
-        until: end date (YYYY-MM-DD)
-        period: 'lifetime', 'day'
+        date_preset: 'yesterday', 'last_7d', 'last_30d', etc.
+        since/until: Custom date range (YYYY-MM-DD format)
+        metrics: List of metrics to fetch
 
     Returns:
-        pandas.DataFrame with post insights
+        pandas.DataFrame with organic insights data
 
-    Reference: GET /{POST_ID}/insights?metric=...
+    Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
     """
-    if not config.META_ACCESS_TOKEN:
-        logger.error("META_ACCESS_TOKEN not configured")
-        return pd.DataFrame()
-
-    # Default metrics for posts
     if metrics is None:
         metrics = [
-            'post_impressions', 'post_reach', 'post_engaged_users',
-            'post_clicks', 'post_reactions_like_total',
-            'post_reactions_love_total', 'post_reactions_wow_total',
-            'post_reactions_haha_total', 'post_reactions_sorry_total',
-            'post_reactions_anger_total'
+            "page_impressions_organic", "page_impressions_paid", 
+            "page_engaged_users", "page_post_engagements",
+            "page_fans", "page_fan_adds", "page_fan_removes"
         ]
 
-    try:
-        all_data = []
+    # Handle date presets
+    if date_preset:
+        today = datetime.now().date()
+        if date_preset == "yesterday":
+            dt = today - timedelta(days=1)
+            since = until = dt.strftime("%Y-%m-%d")
+        elif date_preset == "last_7d":
+            until_dt = today - timedelta(days=1)
+            since = (until_dt - timedelta(days=6)).strftime("%Y-%m-%d")
+            until = until_dt.strftime("%Y-%m-%d")
+        elif date_preset == "last_30d":
+            until_dt = today - timedelta(days=1)
+            since = (until_dt - timedelta(days=29)).strftime("%Y-%m-%d")
+            until = until_dt.strftime("%Y-%m-%d")
+        else:
+            # Default to yesterday for unknown presets
+            dt = today - timedelta(days=1)
+            since = until = dt.strftime("%Y-%m-%d")
 
-        for metric in metrics:
-            url = f"https://graph.facebook.com/{config.GRAPH_API_VERSION}/{post_id}/insights"
-            params = {
-                'metric': metric,
-                'period': period,
-                'access_token': config.META_ACCESS_TOKEN
-            }
-
-            # Add date range for non-lifetime periods
-            if period != 'lifetime' and since and until:
-                params['since'] = since
-                params['until'] = until
-
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-
-            data = response.json()
-
-            if 'data' in data and data['data']:
-                metric_data = data['data'][0]
-
-                if 'values' in metric_data:
-                    for value_entry in metric_data['values']:
-                        row = {
-                            'post_id': post_id,
-                            'metric': metric,
-                            'value': value_entry.get('value', 0)
-                        }
-                        all_data.append(row)
-
-        if not all_data:
-            logger.warning(f"No insights data for post {post_id}")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(all_data)
-
-        # Pivot to have metrics as columns
-        df_pivot = df.pivot(index='post_id', columns='metric', values='value').reset_index()
-
-        return df_pivot
-
-    except requests.RequestException as e:
-        logger.error(f"Error fetching post insights for {post_id}: {e}")
-        return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Unexpected error fetching post insights for {post_id}: {e}")
+    if not since or not until:
+        logger.error("❌ get_organic_insights: must supply since and until or valid date_preset")
         return pd.DataFrame()
 
-def fetch_ig_media_insights(media_id, metrics=None, period='lifetime'):
-    """
-    Fetch Instagram media insights (organic only).
-
-    Args:
-        media_id: Instagram media ID
-        metrics: list of metrics to fetch
-        period: 'lifetime', 'day'
-
-    Returns:
-        pandas.DataFrame with Instagram media insights
-
-    Reference: GET /{MEDIA_ID}/insights?metric=... (Instagram Graph API)
-    Note: For paid IG metrics, use Ads Insights API filtered by creative
-    """
-    if not config.META_ACCESS_TOKEN:
-        logger.error("META_ACCESS_TOKEN not configured")
-        return pd.DataFrame()
-
-    # Default metrics for Instagram media
-    if metrics is None:
-        metrics = [
-            'impressions', 'reach', 'engagement', 'saved',
-            'video_views', 'likes', 'comments', 'shares'
-        ]
-
-    try:
-        all_data = []
-
-        for metric in metrics:
-            url = f"https://graph.facebook.com/{config.GRAPH_API_VERSION}/{media_id}/insights"
-            params = {
-                'metric': metric,
-                'period': period,
-                'access_token': config.META_ACCESS_TOKEN
-            }
-
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-
-            data = response.json()
-
-            if 'data' in data and data['data']:
-                for metric_data in data['data']:
-                    if 'values' in metric_data:
-                        for value_entry in metric_data['values']:
-                            row = {
-                                'media_id': media_id,
-                                'metric': metric_data.get('name', metric),
-                                'value': value_entry.get('value', 0)
-                            }
-                            all_data.append(row)
-
-        if not all_data:
-            logger.warning(f"No insights data for Instagram media {media_id}")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(all_data)
-
-        # Pivot to have metrics as columns
-        df_pivot = df.pivot(index='media_id', columns='metric', values='value').reset_index()
-
-        return df_pivot
-
-    except requests.RequestException as e:
-        logger.error(f"Error fetching Instagram media insights for {media_id}: {e}")
-        return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Unexpected error fetching Instagram media insights for {media_id}: {e}")
-        return pd.DataFrame()
-
-def get_organic_insights(page_id, access_token, since_date, until_date):
-    """
-    Fetch organic insights for a Facebook page.
-    """
-    logger = logging.getLogger(__name__)
-
-    # Check if Facebook SDK was imported successfully
-    if FacebookAdsApi is None or Page is None:
-        logger.error("Facebook Business SDK not available due to import errors")
-        return {
-            'page_insights': [],
-            'instagram_insights': [],
-            'summary': {'error': 'Facebook SDK not available'}
-        }
-
-    try:
-        # Initialize Facebook API if not already done
-        if not FacebookAdsApi.get_default_api():
-            FacebookAdsApi.init(
-                app_id=config.META_APP_ID,
-                app_secret=config.META_APP_SECRET,
-                access_token=access_token
-            )
-
-        page = Page(page_id)
-
-        # Fetch page insights
-        page_insights = []
-        try:
-            insights = page.get_insights(
-                fields=[
-                    'page_impressions',
-                    'page_impressions_unique',
-                    'page_post_engagements',
-                    'page_fans_city',
-                    'page_fans_country',
-                    'page_content_activity'
-                ],
-                params={
-                    'since': since_date,
-                    'until': until_date,
-                    'period': 'day'
-                }
-            )
-            page_insights = [insight.export_all_data() for insight in insights]
-            logger.info(f"Retrieved {len(page_insights)} page insights")
-        except Exception as e:
-            logger.error(f"Error fetching page insights: {e}")
-
-        # Fetch recent posts
-        recent_posts = []
-        try:
-            posts = page.get_posts(
-                fields=[
-                    'id',
-                    'message',
-                    'created_time',
-                    'type',
-                    'likes.summary(true)',
-                    'comments.summary(true)',
-                    'shares'
-                ],
-                params={
-                    'since': since_date,
-                    'until': until_date,
-                    'limit': 50
-                }
-            )
-            recent_posts = [post.export_all_data() for post in posts]
-            logger.info(f"Retrieved {len(recent_posts)} recent posts")
-        except Exception as e:
-            logger.error(f"Error fetching recent posts: {e}")
-
-        return {
-            'page_insights': page_insights,
-            'recent_posts': recent_posts,
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting organic insights: {e}")
-        return {
-            'page_insights': [],
-            'recent_posts': [],
-            'summary': {'error': str(e)}
-        }
+    logger.info(f"📊 Fetching organic insights for {date_preset or f'{since} to {until}'}")
+    return fetch_page_insights(metrics=metrics, since=since, until=until)
 
 def get_organic_performance_summary(days=7):
     """
@@ -416,8 +229,8 @@ def get_organic_performance_summary(days=7):
     posts = fetch_page_posts(limit=10)
 
     summary = {
-        'page_insights': page_insights,
-        'recent_posts': posts,
+        'page_insights': page_insights.to_dict('records') if not page_insights.empty else [],
+        'recent_posts': posts.to_dict('records') if not posts.empty else [],
         'posts_count': len(posts) if not posts.empty else 0
     }
 

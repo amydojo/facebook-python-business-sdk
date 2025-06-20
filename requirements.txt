@@ -1,5 +1,9 @@
 
-facebook-business==23.0.0
+# Shim for Python 3.12 so Streamlit can import distutils.spawn.find_executable
+setuptools-distutils
+
+# Pin facebook-business to stable version compatible with Graph API
+facebook-business==18.0.0
 pandas==2.1.4
 requests==2.31.0
 python-dotenv==1.0.0
