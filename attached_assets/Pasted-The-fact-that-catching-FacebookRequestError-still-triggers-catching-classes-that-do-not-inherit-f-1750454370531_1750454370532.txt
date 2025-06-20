@@ -1,0 +1,192 @@
+The fact that catching `FacebookRequestError` still triggers “catching classes that do not inherit from BaseException” means that `FacebookRequestError` in your code is not actually an Exception subclass. Let’s debug and fix this step by step.
+
+---
+
+## 1. Verify what `FacebookRequestError` actually is
+
+Before catching it, print out the object and its type to see what you imported:
+
+1. In `fb_client.py`, temporarily add at the top of `_initialize`, before the `try` block:
+
+   ```python
+   # fb_client.py
+
+   import logging
+   # existing imports...
+   try:
+       from facebook_business.exceptions import FacebookRequestError
+   except ImportError:
+       FacebookRequestError = None
+
+   logger = logging.getLogger(__name__)
+
+   class FacebookClient:
+       def __init__(self):
+           self.account = None
+           self._initialize()
+
+       def _initialize(self):
+           # DEBUG: inspect FacebookRequestError
+           logger.info(f"DEBUG: FacebookRequestError imported as: {FacebookRequestError}")
+           if FacebookRequestError is not None:
+               is_exception = isinstance(FacebookRequestError, type) and issubclass(FacebookRequestError, BaseException)
+               logger.info(f"DEBUG: Is subclass of BaseException? {is_exception}")
+           else:
+               logger.info("DEBUG: FacebookRequestError is None (import failed).")
+           # ... rest of initialization ...
+   ```
+
+2. Restart the Streamlit app and check the logs. You should see lines like:
+
+   ```
+   DEBUG: FacebookRequestError imported as: <class 'facebook_business.exceptions.FacebookRequestError'>
+   DEBUG: Is subclass of BaseException? True
+   ```
+
+   or, if the import is wrong:
+
+   ```
+   DEBUG: FacebookRequestError imported as: None
+   DEBUG: FacebookRequestError is None (import failed).
+   ```
+
+   Or possibly something unexpected.
+
+3. If `FacebookRequestError` is `None`, or if `Is subclass of BaseException? False`, that tells us the import path is wrong or the SDK version doesn’t define it there.
+
+---
+
+## 2. Correctly import the SDK exception (or fall back)
+
+### A. If the SDK provides `FacebookRequestError`
+
+* Ensure you installed the Facebook Business SDK (`facebook-business`) of a version that includes `facebook_business.exceptions.FacebookRequestError`.
+* The correct import is:
+
+  ```python
+  from facebook_business.exceptions import FacebookRequestError
+  ```
+* After adding the debug logging, if you see it imports correctly and is subclass of BaseException, you can safely catch it:
+
+  ```python
+  try:
+      # initialization logic
+  except FacebookRequestError as e:
+      logger.error(f"FacebookRequestError during initialization: {e}", exc_info=True)
+  except Exception as e:
+      logger.error(f"Unexpected error: {e}", exc_info=True)
+  ```
+* If the debug shows it is correct subclass, yet you still get the TypeError at the except line, double-check that there are no naming conflicts: maybe you defined `FacebookRequestError` elsewhere in the file, shadowing the imported one.
+
+### B. If import fails or the class isn’t present
+
+* The debug log will show `FacebookRequestError is None` or not subclass. In that case:
+
+  1. **Remove or skip that specific except**. Instead, catch generic `Exception` only:
+
+     ```python
+     try:
+         # init logic...
+     except Exception as e:
+         logger.error(f"Error during Facebook API initialization: {e}", exc_info=True)
+     ```
+  2. Optionally, inspect the real exception type when an error occurs: in a broader except, log `type(e)` so you can identify the proper exception class for future catching.
+
+* This ensures no invalid except clauses remain.
+
+---
+
+## 3. Inspect other exception imports / names
+
+* Search for every `except FacebookError` or `except FacebookRequestError` in `fb_client.py`. After confirming the correct import, ensure no old or mistaken definitions remain.
+* If you had a custom alias or imported incorrectly, remove those lines.
+
+---
+
+## 4. Example revised `_initialize` method
+
+Here’s a cleaned-up version that uses only generic Exception catching, plus optional SDK-specific if import succeeds:
+
+```python
+# fb_client.py
+
+import os, logging
+from facebook_business.api import FacebookAdsApi
+from facebook_business.adobjects.adaccount import AdAccount
+
+# Try import of SDK exception
+try:
+    from facebook_business.exceptions import FacebookRequestError
+except ImportError:
+    FacebookRequestError = None
+
+logger = logging.getLogger(__name__)
+
+class FacebookClient:
+    def __init__(self):
+        self.account = None
+        self._initialize()
+
+    def _initialize(self):
+        access_token = os.getenv("META_ACCESS_TOKEN")
+        app_id = os.getenv("META_APP_ID")
+        app_secret = os.getenv("META_APP_SECRET")
+        ad_account_id = os.getenv("AD_ACCOUNT_ID")
+
+        # DEBUG logs for exception import
+        logger.info(f"DEBUG: FacebookRequestError imported as: {FacebookRequestError}")
+        if FacebookRequestError is not None:
+            is_exc = isinstance(FacebookRequestError, type) and issubclass(FacebookRequestError, BaseException)
+            logger.info(f"DEBUG: Is subclass of BaseException? {is_exc}")
+        else:
+            logger.info("DEBUG: FacebookRequestError is None (import failed).")
+
+        if not access_token or not ad_account_id:
+            logger.error("Missing required configuration: AD_ACCOUNT_ID or META_ACCESS_TOKEN")
+            return
+
+        try:
+            if app_id and app_secret:
+                FacebookAdsApi.init(app_id, app_secret, access_token)
+            else:
+                FacebookAdsApi.init(access_token=access_token)
+            self.account = AdAccount(f"act_{ad_account_id}")
+            logger.info(f"Facebook SDK initialized for Ad Account: {ad_account_id}")
+        except Exception as e:
+            # If you know a valid SDK exception class, you can check type(e) here and log specifically.
+            logger.error(f"Error during Facebook API initialization: {e} (type: {type(e)})", exc_info=True)
+```
+
+* This catches all exceptions safely. Once you identify a specific exception class from the debug logs, you can add a more specific `except SomeSDKException` above the generic except.
+
+---
+
+## 5. Restart and observe
+
+1. Save `fb_client.py` with the above changes.
+2. Restart your Streamlit app.
+3. Check logs for:
+
+   * The DEBUG lines about `FacebookRequestError`.
+   * If initialization fails, the generic exception log with `type(e)`, letting you see what exception the SDK actually raises (e.g., maybe `FacebookRequestError` or another).
+4. Once you know the actual exception class, you can refine the except clause. For example, if the log shows the exception type is `<class 'facebook_business.adobjects.adaccount.AdAccountError'>` (hypothetical), you can import and catch that.
+
+---
+
+## 6. General guideline
+
+* **Only catch classes inheriting from BaseException**. If you import something that isn’t an exception class (or import fails), then that name shouldn’t be in an except clause.
+* Use broad `except Exception` as a fallback; log `type(e)` to discover correct specific exception classes for future targeted catches.
+* After fixing, remove or comment out the debug logs if desired.
+
+---
+
+### TL;DR
+
+1. Add debug logging in `fb_client._initialize` to inspect what `FacebookRequestError` is.
+2. If import fails or it’s not an Exception subclass, remove that specific except and use a generic `except Exception`.
+3. Restart the app, check logs for the actual exception type raised by the SDK.
+4. If there is a valid SDK exception class available, import and catch it specifically; otherwise stick with generic Exception.
+5. Ensure no `except` clause refers to a non-Exception class.
+
+After these fixes, the “TypeError: catching classes that do not inherit from BaseException” will be resolved. Let me know what the debug logs reveal if further tweaks are needed!
