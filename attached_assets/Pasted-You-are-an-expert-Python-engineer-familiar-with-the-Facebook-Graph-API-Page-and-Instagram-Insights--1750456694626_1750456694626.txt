@@ -1,0 +1,112 @@
+You are an expert Python engineer familiar with the Facebook Graph API, Page and Instagram Insights endpoints, and Streamlit apps. Your task is to update the organic-data fetching code so it reliably fetches the latest organic insights (e.g., “yesterday” or the most recent complete day) for both Facebook Page and Instagram. Apply the following changes:
+
+1. Use PAGE_ACCESS_TOKEN:
+   - Ensure the code reads `PAGE_ACCESS_TOKEN` from environment variables and falls back to `META_ACCESS_TOKEN` only if `PAGE_ACCESS_TOKEN` is absent, logging which token is used.
+   - Validate at startup that `PAGE_ACCESS_TOKEN` and `PAGE_ID` exist, and in the IG case that `IG_USER_ID` exists. If missing, log an error and in Streamlit UI show a friendly warning “PAGE_ACCESS_TOKEN or PAGE_ID missing—Facebook Page insights disabled” or “IG_USER_ID missing—Instagram insights disabled.”
+
+2. Fetch “latest” organic data:
+   - Add a function `fetch_latest_page_insights(metrics, period="day")` that automatically determines “yesterday” based on the server’s date (e.g., using `datetime.date.today()` minus one day) and calls the Graph API for that single day.
+   - In `get_organic_insights`, recognize a new preset `"latest"` (or `"yesterday"`) and map it to since/until equal to yesterday’s date. Ensure correct date logic in the server’s timezone.
+   - Example: if today is 2025-06-21, “latest” → since = until = "2025-06-20".
+   - Ensure that if the user selects “Latest” in the Streamlit date-preset selectbox, the code passes `date_preset="latest"` and invokes `fetch_latest_page_insights`.
+
+3. Log full error JSON:
+   - In every HTTP request block (`requests.get(url, params=params)`), before calling `raise_for_status()`, capture `resp.json()` into a variable. If `resp.status_code != 200`, log:
+     ```
+     logger.error(f"Page insights fetch error: status {resp.status_code}, response JSON: {body}")
+     ```
+     Return an empty DataFrame afterward. This reveals exactly why the request failed (invalid metric, permission issue, etc.).
+   - Do similar logging for Instagram fetch: when fetching `/media` or `/media/{id}/insights`, capture and log any error JSON.
+
+4. Validate metric availability:
+   - Optionally add a helper `fetch_page_insights_metadata()` that calls:
+     ```
+     GET /{PAGE_ID}/insights/metadata?access_token={PAGE_ACCESS_TOKEN}
+     ```
+     and logs the available metric names. In comments or logs, suggest comparing desired metrics (e.g. `page_impressions_organic`) against available ones; if missing, warn or skip.
+   - This can help diagnose “Unsupported metric” errors.
+
+5. API version consistency:
+   - Use a configurable `GRAPH_API_VERSION`, e.g. `"v23.0"`, and build URLs as:
+     ```
+     https://graph.facebook.com/{GRAPH_API_VERSION}/{PAGE_ID}/insights
+     ```
+   - If older code used v18.0, update to the chosen version. Document in comments: `# Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/`.
+
+6. Instagram “latest” insights:
+   - Add/extend `fetch_latest_ig_media_insights(ig_user_id, metrics=None)` that:
+     - Computes “yesterday” date.
+     - Calls `/media` endpoint to list recent media items, then for each item within the date window fetches `/media/{media_id}/insights`.
+     - Filters media by `timestamp` so only those posted “yesterday” (or latest day) are included. Log how many items checked vs returned.
+     - Log full error JSON if any media-insights call fails.
+   - In `get_organic_insights`, if an `include_instagram=True` flag or if `IG_USER_ID` is set, and date_preset is `"latest"`, call this `fetch_latest_ig_media_insights`.
+
+7. Refactor function signatures:
+   - In `fetch_organic.py`, ensure you have:
+     ```python
+     def fetch_page_insights(metrics, since, until, period="day"): ...
+     def fetch_latest_page_insights(metrics, period="day"):
+         # Compute yesterday and call fetch_page_insights
+     def get_organic_insights(date_preset=None, since=None, until=None, metrics=None):
+         # If date_preset in ["latest","yesterday"], call fetch_latest_page_insights
+         # Else if date_preset=="last_7d", compute since/until accordingly
+         # Return DataFrame or empty DataFrame on error
+     ```
+   - For Instagram:
+     ```python
+     def fetch_ig_media_insights(ig_user_id, since=None, until=None, metrics=None): ...
+     def fetch_latest_ig_media_insights(ig_user_id, metrics=None):
+         # Compute yesterday, call fetch_ig_media_insights with since=until=yesterday
+     ```
+
+8. Dashboard integration:
+   - In `dashboard.py`, extend the date-preset selectbox to include “Latest” (or “Yesterday”). When selected, pass `date_preset="latest"` to `get_organic_insights`.
+   - For Instagram: if `IG_USER_ID` is present, show a section “Latest Instagram Insights” when preset is “Latest”, calling `fetch_latest_ig_media_insights`.
+   - If no `IG_USER_ID`, show a note like “IG_USER_ID not set: Instagram insights disabled.”
+   - Log which branch is taken.
+
+9. Environment checks and logging:
+   - At app startup in `dashboard.py` or a config module, add:
+     ```python
+     logger.info(f"Using PAGE_ACCESS_TOKEN set: {bool(os.getenv('PAGE_ACCESS_TOKEN'))}, PAGE_ID: {os.getenv('PAGE_ID')}")
+     logger.info(f"IG_USER_ID set: {bool(os.getenv('IG_USER_ID'))}")
+     if not os.getenv('PAGE_ACCESS_TOKEN') or not os.getenv('PAGE_ID'):
+         st.warning("PAGE_ACCESS_TOKEN or PAGE_ID missing: Facebook Page insights will be disabled.")
+     if os.getenv('IG_USER_ID') and not os.getenv('PAGE_ACCESS_TOKEN'):
+         st.warning("IG_USER_ID set but PAGE_ACCESS_TOKEN missing: Instagram insights disabled.")
+     ```
+   - This ensures clear feedback in logs and UI.
+
+10. Comments & references:
+    - In code comments reference official documentation URLs:
+      - Page Insights: https://developers.facebook.com/docs/graph-api/reference/page/insights/
+      - Instagram Insights: https://developers.facebook.com/docs/instagram-api/guides/insights/
+      - Token requirements: https://developers.facebook.com/docs/facebook-login/access-tokens
+      - Date logic: `# Compute yesterday via datetime.date.today() - timedelta(days=1)`
+    - Use comment style: `# Official docs: <URL>`.
+
+11. Testing:
+    - Add or update a small test snippet in README or separate script:
+      ```python
+      from fetch_organic import fetch_latest_page_insights, fetch_latest_ig_media_insights
+      df_page = fetch_latest_page_insights(["page_impressions_organic","page_engaged_users"])
+      print("Latest Page insights:", df_page)
+      ig_id = os.getenv("IG_USER_ID")
+      if ig_id:
+          df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions","reach"])
+          print("Latest IG insights:", df_ig)
+      ```
+    - Ensure logs print full URL and params, and either DataFrame or logged error JSON.
+
+12. Error handling in UI:
+    - If DataFrame is empty due to no data or error, display a warning:
+      ```
+      st.warning("No data for latest organic insights. Check permissions, token validity, or whether there was activity yesterday.")
+      ```
+    - This guides the user to check logs and environment.
+
+13. Return updated file contents:
+    - Provide full updated `fetch_organic.py` showing the new functions (`fetch_latest_page_insights`, `fetch_latest_ig_media_insights`, refactored `get_organic_insights`).
+    - Provide relevant changes in `dashboard.py` for the “Latest” preset and environment checks.
+
+Overall, your AI assistant should produce a patch or full updated files for `fetch_organic.py` and related dashboard code so that “fetch latest organic data” works robustly, errors are fully logged, correct tokens are used, and the UI offers a “Latest” option. Include comments referencing the official docs. Use the guidelines above to implement the code.
