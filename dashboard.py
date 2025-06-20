@@ -220,26 +220,78 @@ def main():
             
             # Check organic insights environment
             try:
-                from fetch_organic import validate_organic_environment, ORGANIC_DATE_PRESETS
+                from fetch_organic import (
+                    validate_organic_environment, ORGANIC_DATE_PRESETS, 
+                    get_available_page_metrics, get_valid_instagram_metrics
+                )
                 organic_validation = validate_organic_environment()
                 
-                # Show environment status
+                # Show detailed environment status with actionable warnings
                 if not organic_validation['page_insights_enabled']:
-                    st.warning("⚠️ PAGE_ACCESS_TOKEN or PAGE_ID missing—Facebook Page insights disabled")
+                    st.error("❌ Facebook Page insights disabled")
+                    if not organic_validation['page_token_available']:
+                        st.info("💡 Add PAGE_ACCESS_TOKEN to Replit Secrets to enable Page insights")
+                    if not organic_validation['page_id_available']:
+                        st.info("💡 Add PAGE_ID to Replit Secrets to enable Page insights")
+                else:
+                    st.success("✅ Facebook Page insights enabled")
                 
-                if organic_validation['ig_user_id_available'] and not organic_validation['page_insights_enabled']:
-                    st.warning("⚠️ IG_USER_ID set but PAGE_ACCESS_TOKEN missing—Instagram insights disabled")
-                elif not organic_validation['ig_user_id_available']:
-                    st.info("ℹ️ IG_USER_ID not set: Instagram insights disabled")
+                if organic_validation['ig_user_id_available']:
+                    if organic_validation['instagram_insights_enabled']:
+                        st.success("✅ Instagram insights enabled")
+                    else:
+                        st.warning("⚠️ IG_USER_ID set but PAGE_ACCESS_TOKEN missing—Instagram insights disabled")
+                else:
+                    st.info("ℹ️ Add IG_USER_ID to Replit Secrets to enable Instagram insights")
                 
-                # Date preset selector for organic data
+                # Show available metrics info
+                with st.expander("📊 Available Metrics Info"):
+                    col_page_metrics, col_ig_metrics = st.columns(2)
+                    
+                    with col_page_metrics:
+                        st.subheader("📘 Page Metrics")
+                        if organic_validation['page_insights_enabled']:
+                            available_page_metrics = get_available_page_metrics()
+                            if available_page_metrics:
+                                st.success(f"✅ {len(available_page_metrics)} metrics available")
+                                st.text("\n".join(available_page_metrics))
+                            else:
+                                st.warning("⚠️ Could not fetch available metrics")
+                        else:
+                            st.info("Enable Page insights to see available metrics")
+                    
+                    with col_ig_metrics:
+                        st.subheader("📸 Instagram Metrics")
+                        valid_ig_metrics = get_valid_instagram_metrics()
+                        st.success(f"✅ {len(valid_ig_metrics)} valid metrics")
+                        st.text("\n".join(valid_ig_metrics[:10]))  # Show first 10
+                        if len(valid_ig_metrics) > 10:
+                            st.text("... and more")
+                
+                # Enhanced date preset selector
                 organic_date_preset = st.selectbox(
                     "Select organic time range:",
                     list(ORGANIC_DATE_PRESETS.keys()),
                     format_func=lambda x: ORGANIC_DATE_PRESETS[x],
-                    index=0,  # Default to "latest"
+                    index=1,  # Default to "yesterday"
                     key="organic_preset"
                 )
+                
+                # Custom date range option
+                custom_since = None
+                custom_until = None
+                if organic_date_preset == "custom":
+                    st.subheader("📅 Custom Date Range")
+                    col_since, col_until = st.columns(2)
+                    with col_since:
+                        custom_since = st.date_input("Start Date", value=date.today() - timedelta(days=7))
+                    with col_until:
+                        custom_until = st.date_input("End Date", value=date.today() - timedelta(days=1))
+                    
+                    if custom_since and custom_until:
+                        if custom_since > custom_until:
+                            st.error("❌ Start date must be before end date")
+                            custom_since = custom_until = None
                 
                 col_fetch, col_instagram = st.columns([1, 1])
                 
@@ -247,11 +299,20 @@ def main():
                     if st.button("Fetch Organic Data"):
                         with st.spinner("Fetching organic insights..."):
                             try:
-                                logger.info(f"Fetching organic data with preset: {organic_date_preset}")
-                                organic_data = get_organic_insights(
-                                    date_preset=organic_date_preset,
-                                    include_instagram=True
-                                )
+                                # Prepare parameters for organic insights fetch
+                                fetch_params = {'include_instagram': True}
+                                
+                                if organic_date_preset == "custom" and custom_since and custom_until:
+                                    fetch_params.update({
+                                        'since': custom_since.strftime('%Y-%m-%d'),
+                                        'until': custom_until.strftime('%Y-%m-%d')
+                                    })
+                                    logger.info(f"Fetching organic data for custom range: {custom_since} to {custom_until}")
+                                else:
+                                    fetch_params['date_preset'] = organic_date_preset
+                                    logger.info(f"Fetching organic data with preset: {organic_date_preset}")
+                                
+                                organic_data = get_organic_insights(**fetch_params)
                                 
                                 if not organic_data.empty:
                                     st.success(f"✅ Fetched {len(organic_data)} organic insights records")
@@ -305,14 +366,33 @@ def main():
                                                         title='Page Reach Over Time')
                                             st.plotly_chart(fig, use_container_width=True)
                                 else:
+                                    # Provide specific guidance based on date preset and environment
                                     if organic_date_preset in ['latest', 'yesterday']:
-                                        st.warning("⚠️ No data for latest organic insights. Check permissions, token validity, or whether there was activity yesterday.")
+                                        st.warning("⚠️ No data for latest organic insights")
+                                        st.info("Possible causes:")
+                                        st.info("• No Facebook Page or Instagram activity yesterday")
+                                        st.info("• Token permissions don't include insights")
+                                        st.info("• Page/Instagram account not properly linked")
+                                    elif organic_date_preset == "custom":
+                                        st.info(f"No organic data for {custom_since} to {custom_until}")
                                     else:
                                         st.info("No organic data available for the selected time range")
+                                    
+                                    # Show validation status for debugging
+                                    st.subheader("🔍 Troubleshooting Info")
+                                    st.json(organic_validation)
                                         
                             except Exception as e:
-                                st.error(f"Error fetching organic data: {e}")
+                                st.error(f"❌ Error fetching organic data: {e}")
                                 logger.error(f"❌ Error fetching organic data: {e}", exc_info=True)
+                                
+                                # Provide specific troubleshooting guidance
+                                st.subheader("🛠️ Troubleshooting Steps")
+                                st.info("1. Check if PAGE_ACCESS_TOKEN has sufficient permissions")
+                                st.info("2. Verify PAGE_ID and IG_USER_ID are correct")
+                                st.info("3. Ensure the Facebook Page and Instagram account are properly linked")
+                                st.info("4. Check if the selected date range has any activity")
+                                st.info("5. Review the logs for specific API error messages")
                 
                 with col_instagram:
                     # Instagram-specific latest insights
