@@ -9,14 +9,14 @@ from config import config
 try:
     from facebook_business.api import FacebookAdsApi
     from facebook_business.adobjects.adaccount import AdAccount
-    from facebook_business.exceptions import FacebookError
+    from facebook_business.exceptions import FacebookRequestError
     from facebook_business.adobjects.page import Page
 except ImportError as e:
     logging.error(f"Facebook Business SDK import error: {e}")
     # Fallback or alternative handling
     FacebookAdsApi = None
     AdAccount = None
-    FacebookError = None
+    FacebookRequestError = None
     Page = None
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,8 @@ class FacebookClient:
             else:
                 logger.warning("No AD_ACCOUNT_ID provided - some features will be limited")
 
-        except FacebookError as e:
-            logger.error(f"❌ Facebook API initialization failed: {e}")
+        except FacebookRequestError as e:
+            logger.error(f"❌ Facebook API request error during initialization: {e}")
             self.api = None
             self.ad_account = None
         except Exception as e:
@@ -94,8 +94,11 @@ class FacebookClient:
                 "currency": account_info.get('currency'),
                 "account_id": self.ad_account.get_id()
             }
-        except FacebookError as e:
+        except FacebookRequestError as e:
             logger.error(f"Connection test failed: {e}")
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            logger.error(f"Unexpected error during connection test: {e}")
             return {"success": False, "error": str(e)}
 
 # Global client instance
