@@ -1,0 +1,80 @@
+You are a senior Python engineer, Instagram/Meta API expert, and UX/UI-savvy product thinker. Your task is to automatically patch and enhance our Streamlit “AI-Powered Social Campaign Optimizer” codebase (especially the Instagram insights module in fetch_organic.py and dashboard.py) so that:
+
+1. **Instagram Metrics Discovery & Fetching**  
+   - Use Graph API metadata endpoints when available: call `/{media_id}/insights/metadata?access_token=...` to list supported metrics. Cache results to avoid repeated calls.  
+   - If metadata endpoint fails or is unavailable, use an improved fallback list per media type/product:  
+     - For Reels: try metrics = ["reach","total_interactions","ig_reels_avg_watch_time","ig_reels_video_view_total_time","clips_replays_count","ig_reels_aggregated_all_plays_count","profile_visits","follows"]. Remove deprecated/unsupported (e.g., plays, impressions) based on API errors.  
+     - For Videos (non-Reel): ["reach","total_interactions","video_views","profile_visits","follows"].  
+     - For Images: ["reach","total_interactions","comments","shares","saved","profile_visits"].  
+     - For Carousels: ["reach","total_interactions","comments","shares","saved","profile_visits"], optionally deeper per-child if feasible.  
+   - Implement iterative removal: attempt GET `/{media_id}/insights?metric=comma_separated`; on 400 errors parse message to drop unsupported metric and retry until only supported remain. Log each removal.  
+   - Fetch IG user-level context: GET `/{ig_user_id}?fields=followers_count` once per session; optionally fetch account-level insights (profile_views, website_clicks, etc.) via user-level endpoints if desired.
+
+2. **Refactor fetch_ig_media_insights to Return Long Format**  
+   - Each record row: `media_id, timestamp, caption, media_url, permalink, thumbnail_url, metric, value`.  
+   - In fetch_ig_media_insights(ig_user_id, since, until):  
+     - Fetch media list via pagination: fields id, caption, timestamp, media_type, media_product_type, media_url, permalink, thumbnail_url.  
+     - Filter by date range.  
+     - For each media, call helper to fetch insights in long format using chosen metrics.  
+     - If no token or missing IG_USER_ID: return empty DataFrame with correct columns.  
+     - Cache results with @st.cache_data in dashboard for performance.
+
+3. **Fix OpenAI Integration**  
+   - Remove any incorrect `OpenAI(api_key=..., proxies=...)` usage. Use standard `import openai; openai.api_key = os.getenv("OPENAI_API_KEY")`.  
+   - In AI commentary section: call `openai.ChatCompletion.create(model="gpt-4", messages=[{"role":"user","content": prompt_text}], temperature=0.7, max_tokens=200)`. Catch and log exceptions.  
+   - Wrap in a cached function keyed by media_id so repeated UI interactions don’t re-call API unnecessarily. Show friendly warning if API key missing.
+
+4. **Enhance Dashboard UI/UX**  
+   - In dashboard.py, create a dedicated `show_instagram_insights()` section with:  
+     - Sidebar or top-level date selectors (Since / Until) for Instagram data.  
+     - “Fetch Instagram Data” button that triggers cached fetch.  
+     - Show “Available metrics: […]” sorted list from the long-format DataFrame.  
+     - Build a selectbox of posts: label = “YYYY-MM-DD: first 50 chars of caption…”.  
+     - When a post is selected, use `st.container()` and one-level `st.columns([1,2])` to show preview: `st.video(media_url)` for videos/Reels or `st.image(media_url or thumbnail_url)` for images, plus a “View on Instagram” link.  
+     - Display a DataFrame table of metric/value for that media.  
+     - Under an expander “Computed KPIs & Engagement Analysis”: compute follower_count from cached IG user call; compute engagement rate (total_interactions/follower_count or /reach), save/comment/share/view rates, avg watch time if available; display via `st.metric` in columns; show follower count.  
+     - Under the same expander or another “Historical Comparison” sub-section: build a small DataFrame of previous posts’ engagement rates over the date range, compute average engagement rate, compare current post vs average, show success/warning message accordingly. If enough data, analyze best posting weekday/hour and display suggestion.  
+     - Under “Caption Analysis”: compute word count, hashtag count, basic emoji count; show summary.  
+     - Under an expander “AI Commentary & Recommendations”: call cached OpenAI function with a concise prompt including post date, caption snippet, key metrics_map, follower count, ask for 2-3 actionable recommendations for 2025 Instagram. Display result or warning if fails.  
+     - Under an expander “Instagram Trends Over Time”: pivot DataFrame by date, allow multiselect of metrics to plot, create matplotlib figure (one plot per metric on same axes) using marker='o', rotate x labels. Use `st.pyplot(fig)`.  
+   - Avoid nested columns deeper than one level; use `st.container()` and `st.expander()` for grouping nested content.  
+   - Add checks at start: verify environment variables exist: PAGE_ACCESS_TOKEN, IG_USER_ID; if missing, show st.error and st.stop().
+
+5. **Logging & Error Handling**  
+   - In fetch functions: log URLs and params, status codes and full JSON bodies on errors.  
+   - In metadata helper: log full error JSON to understand why metadata fails.  
+   - In fallback logic: update fallback lists based on observed unsupported metrics (e.g., remove “plays” if deprecated).  
+   - In dashboard: when DataFrame empty, show st.warning with guidance: “No Instagram insights returned: check token, permissions, IG Business linkage, date range.”  
+   - For OpenAI errors: log exception and show st.warning “AI commentary failed: {error}”.
+
+6. **Caching & Performance**  
+   - Use `@st.cache_data(ttl=600)` on fetch functions so repeated clicks within 10 minutes reuse results.  
+   - Cache IG follower count once per session.  
+   - For large media lists, allow limiting number of posts (e.g., “Fetch last N posts”) or refine date range to avoid very long loops.  
+   - Ensure pagination loop for media list is correct: while next page present, fetch until limit or break early based on date filter.
+
+7. **Account-Level Insights (Optional)**  
+   - Add a section “Instagram Account Insights” before media-level: fetch `/{ig_user_id}/insights?metric=profile_views,website_clicks,email_contacts,call_to_action_clicks&period=lifetime` (if supported) or similar endpoints. Display summary metrics and trends over time.  
+   - Use these to contextualize media-level performance.
+
+8. **Styling & Readability**  
+   - Ensure charts have clear titles, axis labels, rotated tick labels.  
+   - Use consistent color palette (Streamlit default is fine).  
+   - In tables, use `st.dataframe(..., use_container_width=True)`.  
+   - Use headings (st.header, st.subheader) and emojis/icons for friendliness: e.g., “📸 Instagram Media Insights”.  
+   - Provide “Help” or “Available Metrics Info” collapsible section with links to Instagram API docs.
+
+9. **Final Integration**  
+   - In main(): set `st.set_page_config(page_title="AI-Powered Social Campaign Optimizer", layout="wide")`, then call `show_instagram_insights()` (and paid campaign sections) in a two-column layout if desired.  
+   - Confirm no stray syntax errors (unmatched braces, missing imports).  
+   - Remove any debugging prints that cause syntax errors; use logger instead.
+
+10. **AI Agent Instructions**  
+    - Locate fetch_organic.py: replace or extend existing `fetch_ig_media_insights` with the long-format, metadata-driven version above. Add helper functions: `get_ig_follower_count`, `fetch_media_insights_metadata`, `choose_metrics_for_media`, `fetch_insights_for_media`, etc.  
+    - Locate dashboard.py: insert or replace Instagram section with `show_instagram_insights()` as described. Fix OpenAI calls. Ensure env checks. Add caching decorators.  
+    - Adjust fallback metric lists based on latest Instagram API docs (remove deprecated metrics).  
+    - Integrate proper error handling and logging.  
+    - Test each part: metadata fetch, fallback flow, data shaping, UI rendering, OpenAI commentary.  
+    - Commit changes automatically or output patched code snippets for fetch_organic.py and dashboard.py.
+
+Use this prompt so the AI agent can apply all code modifications in one pass, yielding an advanced, robust, user-friendly Instagram insights dashboard with comprehensive metrics (especially for Reels), correct OpenAI integration, and optimized UX for performance marketing analysis in 2025. 
