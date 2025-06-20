@@ -305,6 +305,57 @@ def fetch_ig_media_insights(media_id, metrics=None, period='lifetime'):
         logger.error(f"Unexpected error fetching Instagram media insights for {media_id}: {e}")
         return pd.DataFrame()
 
+def get_organic_insights(days=7):
+    """
+    Get organic insights for Facebook Page and Instagram.
+    
+    Args:
+        days: Number of days to look back
+        
+    Returns:
+        dict with organic insights data
+    """
+    try:
+        # Calculate date range
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=days)
+        
+        # Fetch page insights
+        page_insights = fetch_page_insights(
+            since=start_date.strftime('%Y-%m-%d'),
+            until=end_date.strftime('%Y-%m-%d')
+        )
+        
+        # Fetch recent posts
+        posts = fetch_page_posts(limit=10)
+        
+        insights = {
+            'page_insights': page_insights.to_dict('records') if not page_insights.empty else [],
+            'recent_posts': posts.to_dict('records') if not posts.empty else [],
+            'posts_count': len(posts) if not posts.empty else 0,
+            'date_range': {
+                'start': start_date.strftime('%Y-%m-%d'),
+                'end': end_date.strftime('%Y-%m-%d')
+            }
+        }
+        
+        # Calculate averages if data exists
+        if not page_insights.empty:
+            numeric_columns = page_insights.select_dtypes(include=['number']).columns
+            insights['page_averages'] = page_insights[numeric_columns].mean().to_dict()
+        
+        logger.info(f"Successfully retrieved organic insights for {days} days")
+        return insights
+        
+    except Exception as e:
+        logger.error(f"Error getting organic insights: {e}")
+        return {
+            'page_insights': [],
+            'recent_posts': [],
+            'posts_count': 0,
+            'error': str(e)
+        }
+
 def get_organic_performance_summary(days=7):
     """
     Get a summary of organic performance for Facebook Page.
