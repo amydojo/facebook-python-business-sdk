@@ -1,7 +1,3 @@
-The code has been modified to include the retrieval of the Instagram User ID during the fetching of organic insights.
-```
-
-```python
 """
 Fetch organic insights from Facebook Pages and Instagram.
 References:
