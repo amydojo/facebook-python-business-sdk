@@ -1,0 +1,347 @@
+make code changes, add configuration files, update dependencies, and include comments referencing official docs.
+
+You are an expert full-stack Python developer and AI engineer with deep knowledge of:
+- Python packaging and import resolution
+- Streamlit quirks (especially in Python 3.12)
+- The Facebook (Meta) Business SDK for Python
+- Best practices for environment variables and secrets in Replit
+- Official documentation and versioning constraints
+- Logging, error handling, and safe automation patterns.
+
+Your task is to automatically apply all necessary changes to my Replit-based Streamlit project so that:
+1. The Streamlit app no longer crashes on Python 3.12 due to missing `distutils`.
+2. Any local modules or files named `facebook_business` that shadow the installed SDK are detected and removed or renamed.
+3. The official `facebook-business` SDK is installed, imported, and initialized correctly, with no circular imports or shadowing.
+4. Exception handling in `fb_client.py` is corrected: only catching valid Exception subclasses from the SDK.
+5. `fetch_paid.py` and `fetch_organic.py` wrappers and imports are aligned: any undefined imports (e.g., `get_campaign_performance`, `get_organic_insights`) are created or replaced with correct existing functions.
+6. Environment variables (`META_APP_ID`, `META_APP_SECRET`, `META_ACCESS_TOKEN`, `AD_ACCOUNT_ID`, etc.) are validated at startup with clear logging if missing or invalid.
+7. Streamlit is configured to run headless in Replit (so it does not attempt to open a browser and trigger the `distutils` import).
+8. `requirements.txt` is updated to include needed shims (`setuptools-distutils`) and pin `facebook-business` to a stable version matching Graph API version.
+9. A `.streamlit/config.toml` is created (if not present) to set `headless = true` and `enableCORS = false`.
+10. Logging statements are added to confirm import paths and environment variable values, so we can verify at runtime that the correct SDK modules are loaded.
+11. A minimal test script or REPL checks are added in README or as a separate file to verify imports of `facebook_business.api.FacebookAdsApi`, `facebook_business.adobjects.AdAccount`, and `facebook_business.exceptions.FacebookRequestError`.
+12. The README is updated with instructions: how to set Replit Secrets, how to reinstall requirements, how to run Streamlit headless, and how to verify the Facebook SDK import and initialization.
+13. Throughout code changes, include comments referencing official documentation URLs and explain why each change is needed. For citations, use a comment format like:
+    # Official docs: <URL> 
+    Optionally annotate with citation placeholders (e.g., ) if using in contexts requiring reference IDs.
+
+Detailed steps for the assistant to perform:
+
+---
+
+## A. Detect and remove shadow modules
+
+1. **Search the workspace** for any local `facebook_business` module or package that would shadow the real SDK:
+   - Recursively look for directories or files named `facebook_business` or `facebook_business.py`.
+   - If found, delete them or rename to a non-conflicting name. Add a comment: 
+     ```python
+     # Removed local facebook_business module to avoid shadowing the official SDK.
+     ```
+   - After removal, verify by running:
+     ```python
+     import facebook_business
+     print(facebook_business.__file__)  # should point to installed package, not workspace
+     ```
+   - If using code, embed a small script or instruction in README: 
+     ```bash
+     find . -name "facebook_business"    # to confirm no local shadow remains
+     ```
+
+## B. Update `requirements.txt`
+
+1. Ensure at the very top:
+setuptools-distutils
+
+This shim provides `distutils` for Python 3.12 so Streamlit’s browser-opening logic succeeds. 
+- Comment: `# Shim for Python 3.12 so Streamlit can import distutils.spawn.find_executable`.
+2. Add or pin:
+facebook-business==18.0.0
+pandas
+streamlit
+pyairtable
+openai
+scikit-learn
+prophet
+requests
+python-dotenv
+
+- Comment: `# Pin facebook-business to match Graph API version v18.0 (adjust if using newer)`.
+3. After editing, run `pip install -r requirements.txt` in the Replit shell.
+
+## C. Configure Streamlit to run headless
+
+1. Create directory `.streamlit/` in project root if not exists.
+2. Create file `.streamlit/config.toml` with:
+```toml
+[server]
+headless = true          # prevents Streamlit from opening browser
+enableCORS = false       # avoid CORS issues in Replit
+Comment at top: # Streamlit config for Replit/Python 3.12: headless mode stops open_browser attempt that imports distutils.
+D. Correct fb_client.py
+
+Imports:
+import os
+import logging
+
+# Official Facebook Business SDK import
+try:
+    from facebook_business.api import FacebookAdsApi
+    from facebook_business.adobjects.adaccount import AdAccount
+    from facebook_business.exceptions import FacebookRequestError
+except ImportError as e:
+    # If SDK not installed or wrongly shadowed, log and re-raise or handle gracefully
+    logging.error(f"❌ Facebook Business SDK import error: {e}", exc_info=True)
+    raise
+Comments referencing: # Official docs: https://developers.facebook.com/docs/business-sdk/
+Initialization:
+logger = logging.getLogger(__name__)
+
+class FacebookClient:
+    def __init__(self):
+        self.account = None
+        self._initialize()
+
+    def _initialize(self):
+        access_token = os.getenv("META_ACCESS_TOKEN")
+        app_id = os.getenv("META_APP_ID")
+        app_secret = os.getenv("META_APP_SECRET")
+        ad_account_id = os.getenv("AD_ACCOUNT_ID")
+        logger.info(f"FB Init: AD_ACCOUNT_ID: {ad_account_id}, ACCESS_TOKEN set? {bool(access_token)}")
+        if not access_token or not ad_account_id:
+            logger.error("Missing required configuration: AD_ACCOUNT_ID or META_ACCESS_TOKEN")
+            return
+        try:
+            # Initialize SDK with app secret proof if available
+            if app_id and app_secret:
+                FacebookAdsApi.init(app_id, app_secret, access_token)
+                logger.info("FacebookAdsApi initialized with app secret proof")
+            else:
+                FacebookAdsApi.init(access_token=access_token)
+                logger.info("FacebookAdsApi initialized with access token only")
+            # Create AdAccount instance
+            self.account = AdAccount(f"act_{ad_account_id}")
+            logger.info(f"Facebook SDK initialized for Ad Account: {ad_account_id}")
+        except Exception as e:
+            # Log full exception type and message
+            logger.error(f"Error during Facebook API initialization: {e} (type: {type(e)})", exc_info=True)
+Remove any previous except FacebookError or invalid excepts. Only catch generic Exception (or specific SDK exceptions if correctly imported).
+Comments referencing: # Official docs: https://developers.facebook.com/docs/business-sdk/guides/setup
+At module level, after class definition, instantiate:
+try:
+    fb_client = FacebookClient()
+except Exception:
+    # If initialization fails, we leave fb_client.account as None
+    fb_client = FacebookClient()  # or handle accordingly
+But better: do not re-instantiate on failure; handle missing account in calling code.
+E. Fix wrappers in fetch_paid.py
+
+Open fetch_paid.py. Identify existing functions; if get_campaign_performance is missing:
+If there is a function fetch_ad_insights, keep it.
+Define wrapper:
+import logging
+from fb_client import fb_client
+
+def fetch_ad_insights(level="campaign", fields=None, date_preset=None, since=None, until=None, filtering=None, breakdowns=None):
+    """
+    Generic fetcher for paid insights via Facebook Business SDK.
+    Official docs: https://developers.facebook.com/docs/marketing-api/insights/
+    """
+    account = getattr(fb_client, "account", None)
+    if account is None:
+        logging.error("fetch_ad_insights: Facebook client not initialized")
+        return pd.DataFrame()
+    params = {}
+    if level:
+        params["level"] = level
+    if fields:
+        params["fields"] = ",".join(fields)
+    if date_preset:
+        params["date_preset"] = date_preset
+    elif since and until:
+        params["time_range"] = {"since": since, "until": until}
+    if filtering:
+        params["filtering"] = filtering
+    if breakdowns:
+        params["breakdowns"] = breakdowns
+    all_data = []
+    try:
+        insights = account.get_insights(params=params)
+        while insights:
+            for entry in insights:
+                all_data.append(entry.export_all_data())
+            try:
+                insights = insights.next_page()
+            except Exception:
+                break
+    except Exception as e:
+        logging.error(f"fetch_ad_insights error: {e}", exc_info=True)
+        return pd.DataFrame()
+    if not all_data:
+        return pd.DataFrame()
+    import pandas as pd
+    return pd.DataFrame(all_data)
+Add wrapper:
+def get_campaign_performance(date_preset="last_7d", since=None, until=None, extra_fields=None):
+    """
+    Wrapper to fetch campaign-level performance. Returns DataFrame.
+    """
+    base_fields = ["campaign_id", "campaign_name", "impressions", "clicks", "spend", "ctr", "cpc"]
+    if extra_fields:
+        for f in extra_fields:
+            if f not in base_fields:
+                base_fields.append(f)
+    return fetch_ad_insights(level="campaign", fields=base_fields, date_preset=date_preset, since=since, until=until)
+At top, ensure import import pandas as pd if DataFrame used.
+Comments: # Official docs: https://developers.facebook.com/docs/marketing-api/insights/
+In dashboard.py, import this wrapper:
+from fetch_paid import get_campaign_performance
+and remove any previous incorrect import names.
+F. Fix wrappers in fetch_organic.py
+
+Open fetch_organic.py. Identify existing functions: e.g., fetch_page_insights, fetch_page_posts, etc.
+If the import get_organic_insights is failing, either:
+Change dashboard to import existing functions:
+from fetch_organic import fetch_page_insights
+Or add wrapper in fetch_organic.py:
+import logging
+from datetime import date, timedelta
+
+def fetch_page_insights(metrics, since, until, period="day"):
+    # existing implementation
+    ...
+def get_organic_insights(date_preset=None, since=None, until=None, metrics=None):
+    """
+    Wrapper to fetch organic page insights.
+    """
+    if metrics is None:
+        metrics = ["page_impressions_organic", "page_impressions_paid", "page_engaged_users"]
+    if date_preset:
+        today = date.today()
+        if date_preset == "yesterday":
+            dt = today - timedelta(days=1)
+            since = until = dt.strftime("%Y-%m-%d")
+        elif date_preset == "last_7d":
+            until_dt = today - timedelta(days=1)
+            since = (until_dt - timedelta(days=6)).strftime("%Y-%m-%d")
+            until = until_dt.strftime("%Y-%m-%d")
+        else:
+            # Add more presets as needed or default behavior
+            since = until = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    if not since or not until:
+        logging.error("get_organic_insights: must supply since and until or valid date_preset")
+        return pd.DataFrame()
+    return fetch_page_insights(metrics=metrics, since=since, until=until)
+Ensure import pandas as pd if needed.
+Comments: # Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/
+In dashboard.py, use:
+from fetch_organic import get_organic_insights
+G. Validate environment variables at startup
+
+In a central config or at top of dashboard.py or in fb_client.py, add:
+import os, logging
+logger = logging.getLogger(__name__)
+
+required_env = ["META_ACCESS_TOKEN", "AD_ACCOUNT_ID"]
+missing = [k for k in required_env if not os.getenv(k)]
+if missing:
+    logger.error(f"Missing environment variables: {missing}. Please set in Replit Secrets.")
+If missing, dashboard can show a warning:
+import streamlit as st
+if missing:
+    st.error(f"Missing environment vars: {missing}. Cannot fetch paid insights until configured.")
+H. Add import verification tests
+
+Create a file test_sdk_import.py with:
+# test_sdk_import.py
+import logging
+logging.basicConfig(level=logging.INFO)
+try:
+    from facebook_business.api import FacebookAdsApi
+    from facebook_business.adobjects.adaccount import AdAccount
+    from facebook_business.exceptions import FacebookRequestError
+    logging.info("Facebook Business SDK imports successful")
+    print("SUCCESS: FacebookAdsApi, AdAccount, FacebookRequestError imported")
+except Exception as e:
+    logging.error(f"Facebook Business SDK import failed: {e}", exc_info=True)
+    raise
+Add instructions in README: run python test_sdk_import.py to verify.
+I. Update README.md
+
+Add a section Setup & Troubleshooting:
+Replit Secrets: list required vars: META_APP_ID, META_APP_SECRET, META_ACCESS_TOKEN, AD_ACCOUNT_ID, etc.
+Install dependencies: pip install -r requirements.txt.
+Streamlit config: Explain .streamlit/config.toml headless settings to avoid browser errors in Python 3.12.
+Removing local shadow: instruct to ensure no local facebook_business module exists. Show find . -name "facebook_business" example.
+Verify SDK import: run python test_sdk_import.py.
+Run app: streamlit run dashboard.py.
+Token expiration: note long-lived tokens expire after ~60 days; how to regenerate.
+Logging: logs print in console; check for “Facebook SDK initialized” message.
+Comments referencing official docs:
+https://developers.facebook.com/docs/business-sdk/
+https://developers.facebook.com/docs/marketing-api/insights/
+https://docs.streamlit.io/
+https://platform.openai.com/docs/api-reference/chat/create (if relevant)
+Add troubleshooting FAQ:
+distutils ModuleNotFoundError: resolved by setuptools-distutils or headless config.
+ImportError for facebook_business.api: cause: local shadow; solution: delete local folder.
+Missing env vars: error message and fix.
+Invalid OAuth token: code 190; how to refresh.
+J. Re-run pip install and restart
+
+After making modifications, instruct the AI assistant to run in Replit shell:
+pip install -r requirements.txt
+Restart the app:
+streamlit run dashboard.py
+Check logs for:
+No distutils errors.
+Facebook SDK import success and initialization success.
+fetch_paid and fetch_organic imports succeed.
+If any error remains, capture the traceback; but ideally none.
+K. Logging import paths to confirm no shadowing
+
+In fb_client.py, after importing:
+import facebook_business.api as fb_api_module
+logger.info(f"facebook_business.api loaded from: {fb_api_module.__file__}")
+This confirms the path points to the installed SDK (e.g., in .pythonlibs/.../facebook_business/api.py), not your workspace.
+Similarly:
+import facebook_business.adobjects.adaccount as fb_adaccount_module
+logger.info(f"facebook_business.adobjects.adaccount loaded from: {fb_adaccount_module.__file__}")
+L. Final verification in dashboard startup
+
+At top of dashboard.py, add:
+import logging, os
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.info("Starting Streamlit app")
+# Environment check
+missing = [k for k in ["META_ACCESS_TOKEN","AD_ACCOUNT_ID"] if not os.getenv(k)]
+if missing:
+    st.error(f"Missing env vars: {missing}")
+    logger.error(f"Missing env vars: {missing}")
+# Verify Facebook SDK imports
+try:
+    import facebook_business.api as fb_api
+    logger.info(f"facebook_business.api location: {fb_api.__file__}")
+except Exception as e:
+    logger.error(f"Failed to import facebook_business.api: {e}", exc_info=True)
+    st.stop()
+This ensures early failure if import still broken.
+M. Provide commit/patch instructions
+
+In the prompt, ask the assistant to generate diffs or update files in place:
+Remove any local facebook_business/ directories.
+Edit requirements.txt as above.
+Create .streamlit/config.toml.
+Update fb_client.py, fetch_paid.py, fetch_organic.py, dashboard.py, README.md, add test_sdk_import.py.
+Ensure code comments link to official docs URLs.
+Use consistent logging and exception patterns.
+Use Python 3.12-compatible constructs.
+N. References to include in comments
+
+Facebook Business SDK setup: https://developers.facebook.com/docs/business-sdk/getting-started/
+Marketing API Insights: https://developers.facebook.com/docs/marketing-api/insights/
+Page Insights: https://developers.facebook.com/docs/graph-api/reference/page/insights/
+Streamlit config: https://docs.streamlit.io/library/advanced-features/configuration
+Python 3.12 distutils removal note: reference Python 3.12 changelog or Streamlit issue thread.
+OpenAI API if used elsewhere.
+Replit Secrets guidance.
