@@ -8,7 +8,7 @@ Official docs:
 - Instagram Insights: https://developers.facebook.com/docs/instagram-api/guides/insights/
 - Token requirements: https://developers.facebook.com/docs/facebook-login/access-tokens
 
-Updated Graph API version to v23.0 with dynamic metric discovery
+Updated Graph API version to v23.0 with dynamic metric discovery and robust fallback mechanisms
 """
 import os
 import requests
@@ -24,21 +24,24 @@ logger = logging.getLogger(__name__)
 GRAPH_API_VERSION = "v23.0"
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
+# Cache for page insights metadata
+_cached_page_metrics = None
+_metadata_fetch_failed = False
+
+# Fallback Page metrics when metadata fetch fails
+FALLBACK_PAGE_METRICS = ["page_impressions", "page_engaged_users", "page_reach"]
+
 # Valid Instagram metrics for Graph API v23.0
 # Official docs: https://developers.facebook.com/docs/instagram-api/reference/ig-media/insights
 VALID_IG_METRICS = {
-    'impressions', 'reach', 'replies', 'saved', 'video_views', 'likes', 
-    'comments', 'shares', 'plays', 'total_interactions', 'follows',
-    'profile_visits', 'profile_activity', 'navigation', 
-    'ig_reels_video_view_total_time', 'ig_reels_avg_watch_time',
-    'clips_replays_count', 'ig_reels_aggregated_all_plays_count', 'views'
+    "impressions", "reach", "replies", "saved", "video_views", "likes", "comments",
+    "shares", "plays", "total_interactions", "follows", "profile_visits",
+    "profile_activity", "navigation", "ig_reels_video_view_total_time",
+    "ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count", "views"
 }
 
 # Default Instagram metrics (safe subset)
 DEFAULT_IG_METRICS = ['impressions', 'reach', 'total_interactions']
-
-# Cache for page insights metadata
-_cached_page_metrics = None
 
 def get_page_access_token():
     """
@@ -79,64 +82,62 @@ def validate_organic_environment():
     logger.info(f"Organic insights validation: {validation}")
     return validation
 
-def fetch_page_insights_metadata():
-    """
-    Fetch available metrics for Page insights dynamically.
-    
-    Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/metadata/
-    Use this endpoint to list valid Page Insights metrics under the given API version.
-    
-    Returns:
-        List of available metric names or empty list on error
-    """
-    page_token, _ = get_page_access_token()
-    page_id = os.getenv('PAGE_ID')
-
-    if not page_token or not page_id:
-        logger.error("Cannot fetch Page metadata: missing PAGE_ACCESS_TOKEN or PAGE_ID")
-        return []
-
-    url = f"{GRAPH_API_BASE}/{page_id}/insights/metadata"
-    params = {
-        'access_token': page_token
-    }
-
-    try:
-        logger.info(f"Fetching Page insights metadata from: {url}")
-        resp = requests.get(url, params=params)
-        body = resp.json()
-
-        if resp.status_code != 200 or "error" in body:
-            logger.error(f"Page insights metadata error: status {resp.status_code}, response JSON: {body}")
-            return []
-
-        # Extract metric names from metadata
-        metric_names = []
-        for item in body.get('data', []):
-            if 'name' in item:
-                metric_names.append(item['name'])
-
-        logger.info(f"Fetched {len(metric_names)} Page metrics metadata: {metric_names[:10]} ...")
-        return metric_names
-
-    except Exception as e:
-        logger.error(f"Error fetching Page insights metadata: {e}")
-        return []
-
 def get_cached_page_metrics():
     """
-    Get cached Page metrics metadata, fetching if not cached.
+    Get cached Page metrics metadata with robust fallback mechanism.
     
     Returns:
-        List of available metric names
+        List of available metric names or fallback metrics if metadata fetch fails
     """
-    global _cached_page_metrics
+    global _cached_page_metrics, _metadata_fetch_failed
     
-    if _cached_page_metrics is None:
-        logger.info("Caching Page metrics metadata")
-        _cached_page_metrics = fetch_page_insights_metadata()
+    if _cached_page_metrics is not None:
+        return _cached_page_metrics
     
-    return _cached_page_metrics
+    if _metadata_fetch_failed:
+        logger.info("Using fallback Page metrics (metadata previously failed)")
+        _cached_page_metrics = FALLBACK_PAGE_METRICS
+        return _cached_page_metrics
+    
+    # Try metadata fetch
+    page_id = os.getenv("PAGE_ID")
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    
+    if not page_id or not token:
+        logger.error("Cannot fetch Page metadata: missing PAGE_ID or token")
+        _metadata_fetch_failed = True
+        _cached_page_metrics = FALLBACK_PAGE_METRICS
+        return _cached_page_metrics
+    
+    url = f"{GRAPH_API_BASE}/{page_id}/insights/metadata"
+    logger.info(f"Fetching Page insights metadata from: {url}")
+    
+    try:
+        resp = requests.get(url, params={"access_token": token})
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {"error": "Non-JSON response"}
+        
+        if resp.status_code != 200 or "error" in body:
+            logger.error(f"Page insights metadata error: status {resp.status_code}, response JSON: {body}")
+            _metadata_fetch_failed = True
+            _cached_page_metrics = FALLBACK_PAGE_METRICS
+            logger.warning(f"Using fallback Page metrics: {_cached_page_metrics}")
+        else:
+            data = body.get("data", [])
+            metric_names = [item.get("name") for item in data if item.get("name")]
+            logger.info(f"Fetched {len(metric_names)} Page metrics metadata: {metric_names[:10]} ...")
+            _cached_page_metrics = metric_names
+        
+        return _cached_page_metrics
+        
+    except Exception as e:
+        logger.error(f"Exception fetching Page metadata: {e}", exc_info=True)
+        _metadata_fetch_failed = True
+        _cached_page_metrics = FALLBACK_PAGE_METRICS
+        logger.warning(f"Using fallback Page metrics: {_cached_page_metrics}")
+        return _cached_page_metrics
 
 def select_default_page_metrics(available_metrics: List[str]) -> List[str]:
     """
@@ -150,55 +151,26 @@ def select_default_page_metrics(available_metrics: List[str]) -> List[str]:
     """
     # Preferred default metrics (in order of preference)
     candidates = [
-        'page_impressions_organic',
-        'page_impressions_paid', 
-        'page_engaged_users',
-        'page_reach',
-        'page_post_engagements'
+        "page_impressions_organic",
+        "page_impressions_paid", 
+        "page_engaged_users",
+        "page_reach",
+        "page_post_engagements"
     ]
     
-    selected_metrics = []
-    skipped_metrics = []
-    
-    for metric in candidates:
-        if metric in available_metrics:
-            selected_metrics.append(metric)
-        else:
-            skipped_metrics.append(metric)
+    selected = [m for m in candidates if m in available_metrics]
+    skipped = [m for m in candidates if m not in available_metrics]
     
     # If no preferred metrics are available, use the first few available metrics
-    if not selected_metrics and available_metrics:
-        selected_metrics = available_metrics[:3]  # Take first 3 available
-        logger.warning(f"No preferred metrics available, using: {selected_metrics}")
+    if not selected and available_metrics:
+        selected = available_metrics[:3]  # Take first 3 available
+        logger.warning(f"No preferred metrics available, using: {selected}")
     
-    logger.info(f"Default Page metrics: {selected_metrics}")
-    logger.debug(f"Skipped Page metrics (not available): {skipped_metrics}")
+    logger.info(f"Default Page metrics selected: {selected}")
+    if skipped:
+        logger.debug(f"Skipped unavailable Page metrics: {skipped}")
     
-    return selected_metrics
-
-def filter_valid_instagram_metrics(requested_metrics: List[str]) -> List[str]:
-    """
-    Filter Instagram metrics to only include valid ones.
-    
-    Args:
-        requested_metrics: List of requested metric names
-    
-    Returns:
-        List of valid metrics only
-    """
-    valid_metrics = [m for m in requested_metrics if m in VALID_IG_METRICS]
-    invalid_metrics = [m for m in requested_metrics if m not in VALID_IG_METRICS]
-    
-    if invalid_metrics:
-        logger.warning(f"Filtered out invalid Instagram metrics: {invalid_metrics}")
-        logger.info(f"Valid Instagram metrics: {list(VALID_IG_METRICS)}")
-    
-    if not valid_metrics:
-        logger.warning(f"No valid Instagram metrics from request, using defaults: {DEFAULT_IG_METRICS}")
-        return DEFAULT_IG_METRICS
-    
-    logger.info(f"Using valid Instagram metrics: {valid_metrics}")
-    return valid_metrics
+    return selected
 
 def calculate_date_range(date_preset: str) -> tuple:
     """
@@ -244,12 +216,12 @@ def calculate_date_range(date_preset: str) -> tuple:
         target_date = today - timedelta(days=1)
         return target_date.strftime('%Y-%m-%d'), target_date.strftime('%Y-%m-%d')
 
-def fetch_page_insights(metrics: List[str], since: str, until: str, period: str = "day") -> pd.DataFrame:
+def fetch_page_insights(metrics: List[str] = None, since: str = None, until: str = None, period: str = "day") -> pd.DataFrame:
     """
-    Fetch Facebook Page insights for specified date range with dynamic metric validation.
+    Fetch Facebook Page insights for specified date range with robust error handling.
     
     Args:
-        metrics: List of metric names
+        metrics: List of metric names (optional, will use defaults if None)
         since: Start date in YYYY-MM-DD format
         until: End date in YYYY-MM-DD format  
         period: Time period ('day', 'week', 'days_28')
@@ -257,217 +229,257 @@ def fetch_page_insights(metrics: List[str], since: str, until: str, period: str 
     Returns:
         DataFrame with insights data or empty DataFrame on error
     """
-    page_token, _ = get_page_access_token()
-    page_id = os.getenv('PAGE_ID')
-
-    if not page_token or not page_id:
-        logger.error("Cannot fetch page insights: missing PAGE_ACCESS_TOKEN or PAGE_ID")
-        return pd.DataFrame()
-
-    # Get available metrics and filter requested metrics
-    available_metrics = get_cached_page_metrics()
-    if not available_metrics:
-        logger.error("Could not determine available Page metrics, skipping Page insights")
+    page_id = os.getenv("PAGE_ID")
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    
+    if not page_id or not token:
+        logger.error("fetch_page_insights: Missing PAGE_ID or token.")
         return pd.DataFrame()
     
-    # Filter metrics to only include available ones
-    valid_metrics = [m for m in metrics if m in available_metrics]
+    # Get available metrics with fallback
+    available = get_cached_page_metrics()
     
-    if not valid_metrics:
-        logger.error(f"No valid Page metrics to request: {metrics}, available: {available_metrics}")
+    # If caller passed metrics, filter; if None, pick defaults
+    if metrics:
+        valid = [m for m in metrics if m in available]
+    else:
+        valid = select_default_page_metrics(available)
+    
+    if not valid:
+        logger.error(f"No valid Page metrics to request: requested={metrics}, available={available}")
         return pd.DataFrame()
-
-    metric_str = ",".join(valid_metrics)
+    
+    metric_str = ",".join(valid)
     url = f"{GRAPH_API_BASE}/{page_id}/insights"
     params = {
-        'metric': metric_str,
-        'period': period,
-        'since': since,
-        'until': until,
-        'access_token': page_token
+        "metric": metric_str,
+        "period": period,
+        "since": since,
+        "until": until,
+        "access_token": token
     }
-
+    
+    logger.info(f"Fetching Page insights for {since} to {until} with metrics: {valid}")
+    
     try:
-        logger.info(f"Fetching Page insights for {since} to {until} with metrics: {valid_metrics}")
         resp = requests.get(url, params=params)
-        body = resp.json()
-
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {"error": "Non-JSON response"}
+        
         if resp.status_code != 200 or "error" in body:
             logger.error(f"Page insights fetch error: status {resp.status_code}, response JSON: {body}")
             return pd.DataFrame()
-
-        # Parse insights data
-        insights_data = []
-        for metric_data in body.get('data', []):
-            metric_name = metric_data.get('name')
-            for value_entry in metric_data.get('values', []):
-                insights_data.append({
-                    'date': value_entry.get('end_time', since),
-                    'metric': metric_name,
-                    'value': value_entry.get('value', 0)
+        
+        data = body.get("data", [])
+        records = []
+        
+        for mobj in data:
+            name = mobj.get("name")
+            for v in mobj.get("values", []):
+                records.append({
+                    "date": v.get("end_time", since),
+                    "metric": name,
+                    "value": v.get("value", 0)
                 })
-
-        df = pd.DataFrame(insights_data)
-        if not df.empty:
-            df['date'] = pd.to_datetime(df['date']).dt.date
-            logger.info(f"Successfully fetched {len(df)} Page insights records")
-        else:
-            logger.warning("No Page insights data returned")
-
+        
+        if not records:
+            logger.info("fetch_page_insights: No records returned.")
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date']).dt.date
+        logger.info(f"Successfully fetched {len(df)} Page insights records")
         return df
-
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"fetch_page_insights network error: {e}", exc_info=True)
+        return pd.DataFrame()
     except Exception as e:
-        logger.error(f"Error fetching Page insights: {e}")
+        logger.error(f"fetch_page_insights unexpected error: {e}", exc_info=True)
         return pd.DataFrame()
 
-def fetch_latest_page_insights(metrics: List[str], period: str = "day") -> pd.DataFrame:
+def fetch_latest_page_insights(metrics: List[str] = None, period: str = "day") -> pd.DataFrame:
     """
     Fetch latest (yesterday's) Page insights.
     
     Args:
-        metrics: List of metric names
+        metrics: List of metric names (optional)
         period: Time period ('day', 'week', 'days_28')
     
     Returns:
         DataFrame with latest insights data
     """
-    # Compute yesterday via datetime.date.today() - timedelta(days=1)
-    yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     logger.info(f"Fetching latest Page insights for date: {yesterday}")
-    
-    return fetch_page_insights(metrics, since=yesterday, until=yesterday, period=period)
+    return fetch_page_insights(metrics=metrics, since=yesterday, until=yesterday, period=period)
 
 def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until: Optional[str] = None, metrics: Optional[List[str]] = None) -> pd.DataFrame:
     """
-    Fetch Instagram media insights for specified date range with metric validation.
+    Fetch Instagram media insights with per-media retry logic for unsupported metrics.
 
     Args:
         ig_user_id: Instagram Business User ID
         since: Start date in YYYY-MM-DD format (optional)
         until: End date in YYYY-MM-DD format (optional)
-        metrics: List of metrics (default: filtered defaults)
+        metrics: List of metrics (optional, defaults to safe subset)
 
     Returns:
         DataFrame with Instagram insights data
     """
-    page_token, _ = get_page_access_token()
-
-    if not page_token:
-        logger.error("Cannot fetch Instagram insights: missing PAGE_ACCESS_TOKEN")
-        return pd.DataFrame()
-
-    # Filter and validate metrics
-    if not metrics:
-        metrics = DEFAULT_IG_METRICS.copy()
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
     
-    valid_metrics = filter_valid_instagram_metrics(metrics)
-    if not valid_metrics:
-        logger.error("No valid Instagram metrics available")
+    if not ig_user_id or not token:
+        logger.error("fetch_ig_media_insights: Missing IG_USER_ID or token.")
+        return pd.DataFrame()
+    
+    # Determine initial metrics
+    default = ["impressions", "reach", "total_interactions"]
+    req_metrics = metrics or default
+    
+    # Filter against VALID_IG_METRICS
+    valid_initial = [m for m in req_metrics if m in VALID_IG_METRICS]
+    if not valid_initial:
+        logger.error(f"No valid IG metrics in requested {req_metrics}")
+        return pd.DataFrame()
+    
+    logger.info(f"Initial valid Instagram metrics: {valid_initial}")
+    
+    # Fetch media list
+    url_media = f"{GRAPH_API_BASE}/{ig_user_id}/media"
+    params_media = {
+        "fields": "id,caption,timestamp,media_type,media_product_type",
+        "access_token": token,
+        "limit": 100
+    }
+    
+    try:
+        resp_media = requests.get(url_media, params=params_media)
+        try:
+            body_media = resp_media.json()
+        except ValueError:
+            body_media = {"error": "Non-JSON response"}
+        
+        if resp_media.status_code != 200 or "error" in body_media:
+            logger.error(f"Error fetching IG media list: status {resp_media.status_code}, response: {body_media}")
+            return pd.DataFrame()
+        
+        media_data = body_media.get("data", [])
+        logger.info(f"Found {len(media_data)} Instagram media items")
+        
+    except Exception as e:
+        logger.error(f"fetch_ig_media_insights: Exception fetching media list: {e}", exc_info=True)
         return pd.DataFrame()
 
-    # First, get media list
-    media_url = f"{GRAPH_API_BASE}/{ig_user_id}/media"
-    media_params = {
-        'access_token': page_token,
-        'fields': 'id,timestamp,media_type,caption'
-    }
-
-    try:
-        logger.info(f"Fetching Instagram media from: {media_url}")
-        media_resp = requests.get(media_url, params=media_params)
-        media_body = media_resp.json()
-
-        if media_resp.status_code != 200 or "error" in media_body:
-            logger.error(f"Instagram media fetch error: status {media_resp.status_code}, response JSON: {media_body}")
-            return pd.DataFrame()
-
-        media_items = media_body.get('data', [])
-        logger.info(f"Found {len(media_items)} Instagram media items")
-
-        # Filter by date range if specified
+    records = []
+    
+    for media in media_data:
+        media_id = media.get("id")
+        ts = media.get("timestamp", "")
+        
+        # Filter by date
         if since or until:
-            filtered_media = []
-            for item in media_items:
-                item_date = datetime.fromisoformat(item['timestamp'].replace('Z', '+00:00')).date()
-
-                if since and item_date < datetime.strptime(since, '%Y-%m-%d').date():
-                    continue
-                if until and item_date > datetime.strptime(until, '%Y-%m-%d').date():
-                    continue
-
-                filtered_media.append(item)
-
-            media_items = filtered_media
-            logger.info(f"After date filtering: {len(media_items)} media items")
-
-        # Fetch insights for each media item
-        insights_data = []
-        for media_item in media_items:
-            media_id = media_item['id']
-            insights_url = f"{GRAPH_API_BASE}/{media_id}/insights"
-            insights_params = {
-                'access_token': page_token,
-                'metric': ','.join(valid_metrics)
-            }
-
             try:
-                insights_resp = requests.get(insights_url, params=insights_params)
-                insights_body = insights_resp.json()
-
-                if insights_resp.status_code != 200 or "error" in insights_body:
-                    logger.error(f"Instagram insights fetch error for media {media_id}: status {insights_resp.status_code}, response JSON: {insights_body}")
-                    continue
-
-                # Parse insights data
-                for metric_data in insights_body.get('data', []):
-                    insights_data.append({
-                        'media_id': media_id,
-                        'date': datetime.fromisoformat(media_item['timestamp'].replace('Z', '+00:00')).date(),
-                        'metric': metric_data.get('name'),
-                        'value': metric_data.get('values', [{}])[0].get('value', 0),
-                        'media_type': media_item.get('media_type'),
-                        'caption': media_item.get('caption', '')[:100] + '...' if len(media_item.get('caption', '')) > 100 else media_item.get('caption', '')
-                    })
-
+                media_date = ts.split("T")[0]  # Extract YYYY-MM-DD part
+            except:
+                media_date = None
+            
+            if since and media_date and media_date < since:
+                continue
+            if until and media_date and media_date > until:
+                continue
+        
+        # For this media, start with valid_initial
+        metrics_for_media = list(valid_initial)
+        success = False
+        
+        # Retry logic for removing unsupported metrics
+        while metrics_for_media:
+            metric_str = ",".join(metrics_for_media)
+            url_ins = f"{GRAPH_API_BASE}/{media_id}/insights"
+            params_ins = {"metric": metric_str, "access_token": token}
+            
+            try:
+                resp_ins = requests.get(url_ins, params=params_ins)
+                try:
+                    body_ins = resp_ins.json()
+                except ValueError:
+                    body_ins = {"error": "Non-JSON response"}
+                
+                if resp_ins.status_code == 200 and "data" in body_ins:
+                    # Success - parse the insights
+                    row = {
+                        "media_id": media_id,
+                        "date": datetime.fromisoformat(ts.replace('Z', '+00:00')).date(),
+                        "media_type": media.get("media_type"),
+                        "caption": media.get("caption", "")[:100] + "..." if len(media.get("caption", "")) > 100 else media.get("caption", "")
+                    }
+                    
+                    for mobj in body_ins.get("data", []):
+                        name = mobj.get("name")
+                        vals = mobj.get("values", [])
+                        if vals:
+                            row[name] = vals[-1].get("value", 0)
+                    
+                    records.append(row)
+                    success = True
+                    break
+                
+                # If 400 with unsupported metric, parse and retry
+                if resp_ins.status_code == 400 and "error" in body_ins:
+                    msg = body_ins["error"].get("message", "")
+                    
+                    # Try to extract metric name from error message
+                    # e.g., "... does not support the impressions metric ..."
+                    unsupported = None
+                    for m in metrics_for_media:
+                        if m in msg:
+                            unsupported = m
+                            break
+                    
+                    if unsupported:
+                        metrics_for_media.remove(unsupported)
+                        logger.info(f"Media {media_id}: removed unsupported metric '{unsupported}' and retrying")
+                        if not metrics_for_media:
+                            logger.warning(f"Media {media_id}: no metrics left after removing unsupported ones, skipping")
+                            break
+                        continue
+                
+                # Other error or cannot recover
+                logger.warning(f"Instagram insights fetch error for media {media_id}: status {resp_ins.status_code}, response JSON: {body_ins}")
+                break
+                
             except Exception as e:
                 logger.error(f"Error fetching insights for media {media_id}: {e}")
-                continue
+                break
 
-        df = pd.DataFrame(insights_data)
-        if not df.empty:
-            logger.info(f"Successfully fetched {len(df)} Instagram insights records")
-        else:
-            logger.warning("No Instagram insights data returned")
-
-        return df
-
-    except Exception as e:
-        logger.error(f"Error fetching Instagram media insights: {e}")
+    if not records:
+        logger.info("fetch_ig_media_insights: No media insights returned")
         return pd.DataFrame()
+    
+    df = pd.DataFrame(records)
+    logger.info(f"Successfully fetched {len(df)} Instagram insights records")
+    return df
 
 def fetch_latest_ig_media_insights(ig_user_id: str, metrics: Optional[List[str]] = None) -> pd.DataFrame:
     """
     Fetch latest (yesterday's) Instagram media insights.
     
-    Official docs: https://developers.facebook.com/docs/instagram-api/guides/insights/
-    Fetch yesterday's Instagram media insights by filtering media timestamps.
-    
     Args:
         ig_user_id: Instagram Business User ID
-        metrics: List of metrics (optional, defaults to safe subset)
+        metrics: List of metrics (optional)
     
     Returns:
         DataFrame with latest Instagram insights data
     """
-    # Compute yesterday via datetime.date.today() - timedelta(days=1)
-    yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
     logger.info(f"Fetching latest Instagram insights for date: {yesterday}")
-    
     return fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday, metrics=metrics)
 
 def get_organic_insights(date_preset: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None, metrics: Optional[List[str]] = None, include_instagram: bool = True) -> pd.DataFrame:
     """
-    Get organic insights for Facebook Page and optionally Instagram with dynamic metric discovery.
+    Get organic insights for Facebook Page and optionally Instagram with robust fallback mechanisms.
 
     Args:
         date_preset: Preset date range ('latest', 'yesterday', 'last_7d', 'last_30d', 'this_month', 'last_month')
@@ -491,13 +503,9 @@ def get_organic_insights(date_preset: Optional[str] = None, since: Optional[str]
 
     # Get default metrics if none specified, then validate them
     if not metrics:
-        # Get available Page metrics and select defaults
+        # Get available Page metrics and select defaults (with fallback)
         available_page_metrics = get_cached_page_metrics()
-        if available_page_metrics:
-            metrics = select_default_page_metrics(available_page_metrics)
-        else:
-            logger.warning("Could not get available Page metrics, using fallback")
-            metrics = ['page_views']  # Fallback metric
+        metrics = select_default_page_metrics(available_page_metrics)
 
     # Fetch Page insights
     page_df = pd.DataFrame()
@@ -622,17 +630,34 @@ def get_valid_instagram_metrics():
     return list(VALID_IG_METRICS)
 
 if __name__ == "__main__":
-    # Test metadata fetch
+    # Test metadata fetch with fallback
+    logger.info("🧪 Testing Page metrics metadata fetch with fallback...")
     available = get_cached_page_metrics()
-    print("Available Page metrics metadata:", available)
+    print(f"Available Page metrics metadata: {available}")
+    
     defaults = select_default_page_metrics(available)
-    print("Default Page metrics:", defaults)
+    print(f"Default Page metrics: {defaults}")
+    
     # Test latest Page insights
     if defaults:
+        logger.info("🧪 Testing latest Page insights...")
         df_latest = fetch_latest_page_insights(defaults)
-        print("Latest Page insights:", df_latest)
+        print(f"Latest Page insights: {len(df_latest)} records")
+        if not df_latest.empty:
+            print(df_latest.head())
+    
     # Test Instagram latest
     ig_id = os.getenv("IG_USER_ID")
     if ig_id:
-        df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions","reach"])
-        print("Latest IG insights:", df_ig)
+        logger.info("🧪 Testing latest Instagram insights...")
+        df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions", "reach"])
+        print(f"Latest IG insights: {len(df_ig)} records")
+        if not df_ig.empty:
+            print(df_ig.head())
+    
+    # Test combined organic insights
+    logger.info("🧪 Testing combined organic insights...")
+    combined_df = get_organic_insights(date_preset="yesterday")
+    print(f"Combined organic insights: {len(combined_df)} records")
+    if not combined_df.empty:
+        print(combined_df.head())
