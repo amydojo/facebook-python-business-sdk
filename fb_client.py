@@ -5,21 +5,58 @@ Reference: https://developers.facebook.com/docs/business-sdk/getting-started/
 import logging
 from config import config
 
-# Import Facebook Business SDK components after fixing circular imports
+# Import Facebook Business SDK components with proper error handling
+FacebookAdsApi = None
+AdAccount = None
+FacebookRequestError = None
+Page = None
+
+logger = logging.getLogger('fb_client')
+
+# Check if facebook_business module is available at all
+try:
+    import facebook_business
+    logger.info(f"✅ Facebook Business SDK base module available (version: {getattr(facebook_business, '__version__', 'unknown')})")
+    
+    # Check for circular import by inspecting the api module
+    try:
+        import facebook_business.api
+        logger.info("✅ facebook_business.api module accessible")
+    except Exception as api_e:
+        logger.error(f"❌ facebook_business.api module error: {api_e}")
+        
+except ImportError as base_e:
+    logger.error(f"❌ Facebook Business SDK base module not available: {base_e}")
+
+# Import core components
 try:
     from facebook_business.api import FacebookAdsApi
     from facebook_business.adobjects.adaccount import AdAccount
-    from facebook_business.exceptions import FacebookRequestError
     from facebook_business.adobjects.page import Page
+    logger.info("✅ Facebook Business SDK core components imported successfully")
 except ImportError as e:
-    logging.error(f"Facebook Business SDK import error: {e}")
-    # Fallback or alternative handling
-    FacebookAdsApi = None
-    AdAccount = None
-    FacebookRequestError = None
-    Page = None
+    logger.error(f"❌ Facebook Business SDK core import error: {e}")
+    # Check if it's specifically a circular import
+    if "circular import" in str(e).lower() or "partially initialized" in str(e).lower():
+        logger.error("🔄 Circular import detected - this is a known issue with facebook-business SDK")
 
-logger = logging.getLogger(__name__)
+# Import exceptions separately to avoid circular import issues
+try:
+    from facebook_business.exceptions import FacebookRequestError
+    logger.info("✅ Facebook Business SDK exceptions imported successfully")
+    
+    # Verify the exception class is properly formed
+    if FacebookRequestError and isinstance(FacebookRequestError, type):
+        is_exception = issubclass(FacebookRequestError, BaseException)
+        logger.info(f"✅ FacebookRequestError is valid exception class: {is_exception}")
+    else:
+        logger.warning("⚠️ FacebookRequestError imported but not a proper class")
+        
+except ImportError as e:
+    logger.error(f"❌ Facebook Business SDK exceptions import error: {e}")
+    FacebookRequestError = None
+
+logger = logging.getLogger('fb_client')
 
 class FacebookClient:
     """Facebook Business SDK client wrapper."""
@@ -34,6 +71,17 @@ class FacebookClient:
         Initialize Facebook Ads API with app secret proof.
         Reference: https://developers.facebook.com/docs/business-sdk/getting-started/
         """
+        # Debug: inspect FacebookRequestError import
+        logger.info(f"DEBUG: FacebookRequestError imported as: {FacebookRequestError}")
+        if FacebookRequestError is not None:
+            try:
+                is_exception = isinstance(FacebookRequestError, type) and issubclass(FacebookRequestError, BaseException)
+                logger.info(f"DEBUG: Is subclass of BaseException? {is_exception}")
+            except Exception as debug_e:
+                logger.info(f"DEBUG: Error checking FacebookRequestError type: {debug_e}")
+        else:
+            logger.info("DEBUG: FacebookRequestError is None (import failed)")
+
         try:
             # Validate configuration
             config.validate_required_configs()
@@ -59,12 +107,18 @@ class FacebookClient:
             else:
                 logger.warning("No AD_ACCOUNT_ID provided - some features will be limited")
 
-        except FacebookRequestError as e:
-            logger.error(f"❌ Facebook API request error during initialization: {e}")
-            self.api = None
-            self.ad_account = None
         except Exception as e:
-            logger.error(f"❌ Unexpected error during Facebook API initialization: {e}")
+            # Log the actual exception type for debugging
+            logger.error(f"❌ Error during Facebook API initialization: {e} (type: {type(e)})", exc_info=True)
+            
+            # Check if this is a Facebook SDK specific error
+            if FacebookRequestError is not None and isinstance(e, FacebookRequestError):
+                logger.error(f"❌ Facebook API request error during initialization: {e}")
+            elif "facebook" in str(type(e)).lower():
+                logger.error(f"❌ Facebook SDK related error: {e}")
+            else:
+                logger.error(f"❌ Unexpected error during Facebook API initialization: {e}")
+            
             self.api = None
             self.ad_account = None
 
@@ -94,12 +148,64 @@ class FacebookClient:
                 "currency": account_info.get('currency'),
                 "account_id": self.ad_account.get_id()
             }
-        except FacebookRequestError as e:
-            logger.error(f"Connection test failed: {e}")
-            return {"success": False, "error": str(e)}
         except Exception as e:
-            logger.error(f"Unexpected error during connection test: {e}")
+            # Log the actual exception type for debugging
+            logger.error(f"Connection test failed: {e} (type: {type(e)})", exc_info=True)
+            
+            # Check if this is a Facebook SDK specific error
+            if FacebookRequestError is not None and isinstance(e, FacebookRequestError):
+                logger.error(f"Facebook API request error during connection test: {e}")
+            elif "facebook" in str(type(e)).lower():
+                logger.error(f"Facebook SDK related error during connection test: {e}")
+            else:
+                logger.error(f"Unexpected error during connection test: {e}")
+            
             return {"success": False, "error": str(e)}
+
+    def diagnose_sdk(self):
+        """
+        Diagnose Facebook SDK installation and imports.
+        Returns: dict with diagnostic information
+        """
+        diagnostics = {
+            "sdk_installed": False,
+            "core_imports": {},
+            "exception_imports": {},
+            "version_info": None,
+            "recommendations": []
+        }
+
+        # Check core imports
+        diagnostics["core_imports"]["FacebookAdsApi"] = FacebookAdsApi is not None
+        diagnostics["core_imports"]["AdAccount"] = AdAccount is not None
+        diagnostics["core_imports"]["Page"] = Page is not None
+        
+        # Check exception imports
+        diagnostics["exception_imports"]["FacebookRequestError"] = FacebookRequestError is not None
+        
+        if FacebookRequestError is not None:
+            try:
+                diagnostics["exception_imports"]["is_exception_subclass"] = issubclass(FacebookRequestError, BaseException)
+            except Exception as e:
+                diagnostics["exception_imports"]["subclass_check_error"] = str(e)
+
+        # Check if SDK is generally available
+        try:
+            import facebook_business
+            diagnostics["sdk_installed"] = True
+            if hasattr(facebook_business, '__version__'):
+                diagnostics["version_info"] = facebook_business.__version__
+        except ImportError:
+            diagnostics["recommendations"].append("Install facebook-business package: pip install facebook-business")
+
+        # Add recommendations based on findings
+        if not diagnostics["core_imports"]["FacebookAdsApi"]:
+            diagnostics["recommendations"].append("Core Facebook SDK components not available - check installation")
+        
+        if not diagnostics["exception_imports"]["FacebookRequestError"]:
+            diagnostics["recommendations"].append("Facebook SDK exceptions not available - use generic Exception handling")
+
+        return diagnostics
 
 # Global client instance
 fb_client = FacebookClient()
