@@ -454,6 +454,56 @@ class DataStore:
         except Exception as e:
             logger.error(f"Failed to cleanup expired cache: {e}")
     
+    def store_performance_data(self, entity_type: str, entity_id: str, 
+                             entity_name: str, data: Dict[str, Any], 
+                             source: str = 'facebook_ads'):
+        """
+        Store performance data for campaigns, adsets, or ads.
+        
+        Args:
+            entity_type: Type of entity ('campaign', 'adset', 'ad')
+            entity_id: ID of the entity
+            entity_name: Name of the entity
+            data: Performance data dictionary
+            source: Data source (default: 'facebook_ads')
+        """
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Store each metric separately in performance_cache
+                for key, value in data.items():
+                    if key in ['campaign_id', 'adset_id', 'ad_id', 'campaign_name', 'adset_name', 'ad_name']:
+                        continue  # Skip ID and name fields
+                    
+                    # Try to convert value to float, skip if not numeric
+                    try:
+                        numeric_value = float(value) if value is not None else 0.0
+                    except (ValueError, TypeError):
+                        continue
+                    
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO performance_cache 
+                        (account_id, campaign_id, adset_id, ad_id, date_start, 
+                         date_end, metric_name, metric_value, expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+24 hours'))
+                    """, (
+                        data.get('account_id'),
+                        data.get('campaign_id') if entity_type in ['campaign', 'adset', 'ad'] else entity_id,
+                        data.get('adset_id') if entity_type in ['adset', 'ad'] else None,
+                        data.get('ad_id') if entity_type == 'ad' else None,
+                        data.get('date_start'),
+                        data.get('date_stop'),
+                        key,
+                        numeric_value
+                    ))
+                
+                conn.commit()
+                logger.info(f"Stored performance data for {entity_type} {entity_id}")
+                
+        except Exception as e:
+            logger.error(f"Failed to store performance data: {e}")
+
     def get_data_summary(self) -> Dict[str, int]:
         """
         Get summary of data stored in the system.
