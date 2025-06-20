@@ -1,0 +1,180 @@
+Here’s a prompt you can give to your AI assistant so it patches `fetch_organic.py` (and related imports) to address the specific issues seen in your logs, including the repeated 400 error when fetching Page insights metadata and the Instagram media-type–specific metric errors:
+
+````text
+You are a senior Python engineer and Facebook Graph API expert. Based on the logs, we have two persistent issues in `fetch_organic.py`:
+
+1. **Page insights metadata fetch**:
+   Logs show calls to:
+     GET https://graph.facebook.com/v23.0/{PAGE_ID}/insights/metadata
+   returning 400: “(#100) The value must be a valid insights metric”. This indicates our metadata endpoint call is not correct or needs adjustment/fallback.
+
+2. **Instagram media insights per-media metric errors**:
+   For certain media items, requesting a valid metric like “impressions” still returns 400: “The Media Insights API does not support the impressions metric for this media product type.” We must detect media product types and adjust metrics per item.
+
+Additionally, `fetch_latest_ig_media_insights` is now present, but we need robust per-media handling.
+
+**Task**: Patch `fetch_organic.py` (and necessary imports in `dashboard.py`) to implement the following:
+
+---
+
+## A. Fix Page Insights Metadata Fetch
+
+1. **Verify correct metadata endpoint**:  
+   - The intended endpoint to list available Page metrics is `GET /{PAGE_ID}/insights/metadata?access_token=...`. Confirm this is correct for the target API version.  
+   - In code, use:
+     ```python
+     url = f"{GRAPH_API_BASE}/{page_id}/insights/metadata"
+     params = {"access_token": token}
+     ```
+   - Before the request, log:  
+     ```python
+     logger.info(f"Fetching Page insights metadata from: {url}")
+     ```
+2. **Handle 400 properly & fallback**:  
+   - After `resp = requests.get(...)`, parse JSON safely. If `resp.status_code != 200` or `"error"` in JSON with message indicating invalid metric, log:
+     ```
+     logger.error(f"Page insights metadata error: status {resp.status_code}, response JSON: {body}")
+     ```
+   - Recognize that metadata fetch may be unsupported or restricted. Provide a fallback: if metadata fails repeatedly, use a predefined safe list of Page metrics (e.g., ["page_impressions", "page_engaged_users", "page_reach"] or more specifically organic-focused ones known to work) instead of aborting completely. Log:
+     ```
+     logger.warning("Could not fetch Page metrics metadata; using fallback default metrics")
+     ```
+   - Cache metadata attempts: keep a counter or flag so we don’t repeatedly attempt metadata on each run if it fails; after first failure, immediately use fallback defaults. E.g., module-level `_metadata_fetch_failed = False`. On first failure, set it True and skip further metadata calls.
+
+3. **Cache or fallback default**:  
+   - Maintain module-level `_cached_page_metrics = None` and `_metadata_fetch_failed = False`.  
+   - In `get_cached_page_metrics()`: if `_cached_page_metrics` is None and `_metadata_fetch_failed` is False, try metadata fetch. If it succeeds, cache and return. If it fails (400 or other), set `_metadata_fetch_failed = True`, set `_cached_page_metrics = fallback_list`, log the fallback, and return fallback_list. On subsequent calls, immediately return fallback_list.
+
+4. **Select default metrics from available/fallback**:  
+   - Use `select_default_page_metrics(available_metrics)` to pick a subset of those metrics for organic insights. If using fallback_list, pick from that fallback. Log both selected and skipped.
+
+5. **fetch_page_insights uses cached metrics**:  
+   - In `fetch_page_insights(metrics, since, until, period="day")`, ignore the passed-in metrics if they are None: call `get_cached_page_metrics()` and `select_default_page_metrics()`. If the caller passed a custom list, filter it against cached/fallback metrics. If the result is empty, log error and return empty DataFrame.
+   - Log:  
+     ```
+     logger.info(f"Fetching Page insights for {since} to {until} with metrics: {valid_metrics}")
+     ```
+   - If metadata failed and fallback used, the code still fetches with fallback metrics.
+
+---
+
+## B. Instagram per-media metric adjustments
+
+1. **Keep VALID_IG_METRICS set**, but also detect per-media unsupported metrics at runtime:
+   - Define at top:
+     ```python
+     VALID_IG_METRICS = {
+         "impressions", "reach", "replies", "saved", "video_views", "likes", "comments",
+         "shares", "plays", "total_interactions", "follows", "profile_visits",
+         "profile_activity", "navigation", "ig_reels_video_view_total_time",
+         "ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count", "views"
+     }
+     ```
+2. **fetch_ig_media_insights workflow**:
+   - Determine desired metrics list (caller-provided or default). Filter against VALID_IG_METRICS initially. Log filtered valid metrics.  
+   - For each media item:
+     - Optionally fetch the media’s `media_type` or `media_product_type` before requesting insights. Use Graph API: `GET /{media_id}?fields=media_type,media_product_type&access_token=...`. This tells us which metrics are supported.  
+     - Based on `media_type` or `media_product_type`, further filter metrics if known restrictions exist. E.g., if product type does not support “impressions”, remove “impressions”.  
+       - Alternatively, if we don’t know exact mapping, attempt to request all valid metrics, catch the 400 error, parse its message (e.g., “does not support the impressions metric for this media product type”), extract the unsupported metric name from the error message, remove it from the metric list for that media, and retry the request once with the reduced list.  
+       - Log:  
+         ```
+         logger.info(f"Media {media_id} product type {product_type} - removed unsupported metric '{metric}' and retrying")
+         ```
+     - After retry (or initial if supported), if still error or no remaining metrics, skip this media with a warning. Collect successful insights into records.
+
+3. **fetch_latest_ig_media_insights**:
+   - Ensure `fetch_latest_ig_media_insights` exists. It computes yesterday’s date, logs:  
+     ```
+     logger.info(f"Fetching latest Instagram insights for date: {yesterday}")
+     ```
+     calls `fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday, metrics=desired_list)`.  
+   - Export this function so `dashboard.py` can import it.
+
+---
+
+## C. Ensure imports in `dashboard.py` include the new functions
+
+- Update `dashboard.py` imports:
+  ```python
+  from fetch_organic import (
+      get_organic_insights,
+      fetch_latest_page_insights,
+      fetch_ig_media_insights,
+      fetch_latest_ig_media_insights
+  )
+````
+
+* If previously `fetch_latest_ig_media_insights` was missing, this import will now work.
+
+---
+
+## D. Date preset logic remains, but ensure fallback when Page metrics unavailable
+
+* In logs, `this_month` preset triggered “Could not get available Page metrics, using fallback” then “Could not determine available Page metrics, skipping Page insights.” With the fallback logic, we should fetch with fallback metrics rather than skipping entirely. E.g., fallback\_list might include some metrics we know work.
+* The AI patch should ensure that after metadata failure, fallback\_list is used and fetch\_page\_insights is called with fallback metrics, not skipped. For example, fallback\_list = \["page\_impressions", "page\_engaged\_users", "page\_reach"], which likely are valid.
+
+---
+
+## E. Logging and comments
+
+* Above `fetch_page_insights_metadata()`, add:
+
+  ```
+  # Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/metadata/
+  # This endpoint returns definitions of valid Page Insights metrics.
+  ```
+* In fallback logic, comment:
+
+  ```
+  # Fallback default Page metrics if metadata endpoint is unavailable or restricted
+  ```
+* In Instagram per-media handling:
+
+  ```
+  # Official docs: https://developers.facebook.com/docs/instagram-api/guides/insights/
+  # Some media product types do not support all metrics; detect unsupported metrics from error message and retry.
+  ```
+
+---
+
+## F. Testing snippet
+
+At bottom of `fetch_organic.py`, include:
+
+```python
+if __name__ == "__main__":
+    available = get_cached_page_metrics()
+    print("Available Page metrics metadata (or fallback):", available)
+    defaults = select_default_page_metrics(available)
+    print("Default Page metrics:", defaults)
+    if defaults:
+        df_latest = fetch_latest_page_insights(defaults)
+        print("Latest Page insights:", df_latest)
+    ig_id = os.getenv("IG_USER_ID")
+    if ig_id:
+        df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions","reach","total_interactions"])
+        print("Latest IG insights:", df_ig)
+```
+
+---
+
+## Summary
+
+Feed this prompt to your AI assistant so it generates or patches `fetch_organic.py` accordingly:
+
+* Correct metadata endpoint and implement fallback when 400 occurs.
+* Cache metadata or fallback defaults.
+* Patch `fetch_page_insights` to always use cached/fallback metrics.
+* Add `fetch_latest_page_insights`.
+* In Instagram insights, detect unsupported metrics per media (via media type query or error parsing) and retry.
+* Export `fetch_latest_ig_media_insights`.
+* Update `dashboard.py` imports accordingly.
+* Add logging and comments referencing official docs.
+* Include testing snippet.
+
+This will fix the repeated metadata 400 error and the per-media metric errors, making organic fetch robust.
+
+```
+
+Paste the above prompt into your AI assistant; it will produce the necessary code patches to handle metadata failures with a fallback, implement per-media Instagram metric retries, and define the missing functions so your imports in `dashboard.py` succeed.
+```
