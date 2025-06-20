@@ -1,0 +1,199 @@
+You are an expert full-stack Python developer and AI engineer. Your task is to create an AI-powered social campaign optimizer app on Replit that minimizes manual work while maximizing paid ad performance and organic engagement for Meta (Facebook & Instagram). Build modular, production-ready code with clear comments referencing official docs, feature flags for safe automation, and a Streamlit-based interactive UI. Use environment variables for secrets via Replit Secrets. Structure the app so it is easy to review, test, and extend. Follow these requirements:
+
+1. ENVIRONMENT & DEPENDENCIES
+   - Use Python. In requirements.txt, pin versions:
+     - facebook-business==latest stable (e.g., 18.x) to match Graph API version :contentReference[oaicite:0]{index=0}.
+     - pandas, requests, python-dotenv, pyairtable, openai, streamlit, scikit-learn, prophet (or other lightweight forecasting lib).
+   - Read secrets from environment (Replit Secrets):
+     - META_APP_ID, META_APP_SECRET, META_ACCESS_TOKEN (long-lived, scopes: ads_read, ads_management, read_insights, leads_retrieval, pages_read_engagement, instagram_manage_insights).
+     - AD_ACCOUNT_ID (e.g., “860378271946500”).
+     - PAGE_ID for Facebook Page organic insights.
+     - IG_USER_ID for Instagram Business Account insights.
+     - OPENAI_API_KEY for LLM & image generation.
+     - AIRTABLE_API_KEY, AIRTABLE_BASE_ID, and table names for leads/transactions storage.
+     - Toggles: ENABLE_ATTRIBUTION, ENABLE_CHAT_INSIGHTS, ENABLE_AUTO_ACTIONS, FORCE_MARKOV, etc.
+
+2. META SDK INITIALIZATION
+   - Create fb_client.py:
+     - Initialize FacebookAdsApi with APP_ID, APP_SECRET, ACCESS_TOKEN for app secret proof :contentReference[oaicite:1]{index=1}.
+     - Return AdAccount(f"act_{AD_ACCOUNT_ID}") or None if missing/invalid.
+     - Wrap initialization in try/except, log errors.
+
+3. PAID INSIGHTS & LEADFETCH MODULE
+   - In fetch_paid.py:
+     - Function fetch_ad_insights(level, fields:list, date_preset or since/until, filtering:list-of-dicts, breakdowns:list):
+       - Call account.get_insights(params=…) per Marketing API Insights :contentReference[oaicite:2]{index=2}.
+       - Handle paging: loop through insights.next_page().
+       - Return pandas.DataFrame or empty DF on errors.
+     - Function fetch_leads():
+       - account.get_leadgen_forms(fields=['id','name']), then for each form: LeadgenForm(form_id).get_leads(fields=['id','field_data','created_time','ad_id','adset_id','campaign_id']).
+       - Flatten field_data array into DataFrame columns (including hidden UTM fields).
+       - Return DataFrame or empty.
+     - Comments reference:
+       - Marketing API Insights docs: https://developers.facebook.com/docs/marketing-api/insights/ :contentReference[oaicite:3]{index=3}.
+       - Lead Ads guide: https://developers.facebook.com/docs/marketing-api/guides/lead-ads/ :contentReference[oaicite:4]{index=4}.
+
+4. ORGANIC INSIGHTS MODULE
+   - In fetch_organic.py:
+     - fetch_page_insights(metrics:list, since, until, period="day"):
+       - GET https://graph.facebook.com/vX.Y/{PAGE_ID}/insights?metric=…&period=…&since=…&until=…&access_token=… per Page Insights docs :contentReference[oaicite:5]{index=5}.
+       - Parse JSON["data"], pivot into DataFrame with columns per metric per date.
+     - fetch_page_posts(limit), fetch_post_insights(post_id, metrics, since, until, period):
+       - GET /{PAGE_ID}/posts?fields=id,created_time,message.
+       - GET /{POST_ID}/insights?metric=… per Post Insights docs.
+     - fetch_ig_media_insights(media_id, metrics, period):
+       - GET /{MEDIA_ID}/insights?metric=… per Instagram Graph API (organic-only) :contentReference[oaicite:6]{index=6}.
+       - Note: to obtain paid IG metrics, later fetch via Ads Insights filtered by creative linking to that IG media.
+
+5. ATTRIBUTION ENGINE
+   - In attribution.py:
+     - build_journeys(merged_df):
+       - Expect merged_df with columns: lead_id or user_id, timestamp, channel, conversion_id, revenue_amount.
+       - Sort by timestamp, group by conversion_id, produce DataFrame with columns conversion_id, channel_sequence (list), revenue_amount.
+     - Attribution model functions: first_touch, last_touch, linear_attribution, position_based(first_weight, last_weight), time_decay(half_life_days), markov_chain_attribution:
+       - For Markov: implement transition matrix & removal-effect logic or leave placeholder with sampling for large data; reference marketing science blog :contentReference[oaicite:7]{index=7}.
+       - Use FORCE_MARKOV toggle to sample or skip heavy computation.
+     - All functions verify input columns, log warnings on empty sequences, and return DataFrame with columns conversion_id, channel, credit_fraction.
+
+6. FORECAST & WHAT-IF MODULE
+   - In forecast.py:
+     - train_forecast_model(df_spend_rev): for each campaign_id, fit a simple regression (revenue ~ spend) using scikit-learn or a time-series model if needed.
+     - forecast_revenue(models, scenario: dict[campaign_id->new_spend]) -> dict[campaign_id->predicted_revenue].
+     - summarize_forecast(scenario_preds, baseline_period) using OpenAI Chat Completion: prepare JSON-like summary and prompt the LLM: “Given forecasted revenues for next period based on budget scenarios {…} and baseline period {…}, summarize expected outcomes and recommend actions.” :contentReference[oaicite:8]{index=8}.
+
+7. OPENAI INTEGRATION
+   - In openai_client.py:
+     - Initialize openai.api_key = OPENAI_API_KEY.
+     - call_chat(messages:list, **kwargs) wrapping openai.ChatCompletion.create(model="gpt-4" or "gpt-4-turbo", handle errors).
+     - get_embedding(text) via openai.Embedding.create(model="text-embedding-ada-002").
+     - generate_image(prompt_text) via openai.Image.create(...) if desired.
+   - Use Chat Completion for:
+     - Conversational Insights: given summary of DataFrame of metrics, ask LLM to summarize performance, identify underperformers, suggest optimizations.
+     - Copy Generation: generate_ad_copy(brief, tone, audience) by prompting “Generate 5 Facebook ad copy variants…”.
+     - Creative brainstorming: generate_image for draft visuals to review.
+     - Anomaly explanation: feed anomaly change into prompt: “Metric CTR dropped by X%; explain possible causes and next steps.”
+   - Cite OpenAI API docs: https://platform.openai.com/docs/api-reference/chat/create :contentReference[oaicite:9]{index=9} and Images API docs :contentReference[oaicite:10]{index=10}.
+
+8. AUTOMATION & SAFE WRITE-ACTIONS
+   - In auto_actions.py:
+     - safe_update_adset_budget(adset_id, new_budget, dry_run=True): if dry_run or ENABLE_AUTO_ACTIONS is False, log intended action; else call AdSet(adset_id).api_update({'daily_budget':new_budget}).
+     - safe_pause_ad(ad_id, dry_run=True): similar pattern.
+     - create_lookalike(source_audience_id, country="US", ratio=0.01, dry_run=True) using CustomAudience SDK :contentReference[oaicite:11]{index=11}.
+   - Wrap all write operations behind both a dry-run parameter and a global feature flag ENABLE_AUTO_ACTIONS.
+   - Log successes/failures; record audit entries in Airtable or a log file.
+
+9. ANOMALY DETECTION & ALERTS
+   - In anomaly.py:
+     - detect_anomalies(df_metrics, metric_col, threshold_pct=0.3): compare latest vs rolling average, return flagged, change.
+     - analyze_and_alert(df_metrics, metric_name): if flagged, prompt LLM to explain causes and recommend next steps, then send Slack/email via configured webhook. Cite LLM use :contentReference[oaicite:12]{index=12}.
+   - Schedule daily via external cron ping or Replit scheduler to fetch recent metrics and run anomaly checks.
+
+10. STREAMLIT FRONTEND
+    - In dashboard.py (or app.py):
+      - Sidebar: date inputs (preset vs custom), toggles for enabling features.
+      - Sections:
+        • Paid Insights: call fetch_ad_insights(level="campaign"/"adset"/"ad"), show DataFrame.
+        • Organic Insights: show page-level and post-level metrics when date range provided.
+        • Attribution: if ENABLE_ATTRIBUTION, fetch leads, load transactions from Airtable (`pyairtable`), merge, build journeys, compute credit based on selected model, compute channel-level revenue and merge with spend to compute ROAS, display tables/charts.
+        • Chat Co-Pilot: text input; when question entered, prepare context summary (e.g., last paid insights DF summary) and call generate_insights_summary, display narrative.
+        • Creative Lab: inputs for brief/tone/audience, button to generate copy via generate_ad_copy; input for image prompt, button to generate_image and display result.
+        • Budget Forecast: widget to input hypothetical spend changes, call forecast_revenue + summarize_forecast, display narrative.
+        • Automation Actions: inputs for adset_id/new_budget, simulate button (dry-run), and if ENABLE_AUTO_ACTIONS: apply button.
+        • Anomaly Check: manual trigger to run analyze_and_alert.
+    - Ensure missing/empty DataFrames handled gracefully (display “No data”).
+    - Configure logging.basicConfig(level=logging.INFO) so logs appear in Replit console.
+
+11. DATA STORAGE & STATE
+    - Use Airtable via pyairtable or a lightweight SQLite to store:
+      - Raw fetched paid & organic metrics (optional for history).
+      - Leads & transactions (to build journeys).
+      - Audit log: record AI suggestions offered, which ones accepted, automated actions executed.
+      - Historical spend vs revenue for forecasting.
+    - Provide helper module data_store.py to abstract read/write to Airtable or SQLite.
+
+12. SCHEDULING & BACKGROUND TASKS
+    - Expose a lightweight web route (e.g., FastAPI or Flask) at /run-daily to trigger fetch+analysis+alerts; call this daily via external cron/uptime monitor.
+    - Or use APScheduler if Replit instance can remain alive.
+    - In scheduled job:
+      - Fetch latest paid & organic insights for last period.
+      - Update stored historical tables.
+      - Run attribution on new leads+transactions.
+      - Run anomaly detection and send alerts.
+      - Optionally run forecast module and send summary email/Slack.
+      - Summarize via LLM and store summary in Airtable for review.
+
+13. LOGGING & MONITORING
+    - Centralize logging; in each module catch exceptions and log errors without crashing.
+    - In auto_actions, log intended vs actual actions.
+    - Store audit entries in Airtable: timestamp, module, action type, parameters, outcome.
+    - Optionally persist LLM prompts/responses for audit (avoid sensitive data leakage).
+
+14. FEATURE FLAGS & DRY RUN
+    - All risky operations default to dry_run=True. Use env var ENABLE_AUTO_ACTIONS to enable live operations.
+    - ENABLE_ATTRIBUTION to enable attribution pipeline.
+    - ENABLE_CHAT_INSIGHTS to enable chat UI.
+    - FORCE_MARKOV to force Markov computation even on large datasets.
+
+15. VERSION CONTROL & TESTS
+    - Structure code in modules as above. Use git in Replit.
+    - Write unit tests for:
+      - Parsing API responses (mock simple JSON samples).
+      - Attribution functions with example sequences.
+      - Forecast functions with synthetic data.
+      - Prompt formatting functions (validate prompt strings).
+    - Document in README.md:
+      - Setup steps: add Secrets, install requirements, run Replit.
+      - How to test Graph API calls via Graph Explorer manually before running code.
+      - How to switch feature flags.
+      - How to review logs/audit in Airtable.
+
+16. CITED REFERENCES (for code comments/docstrings):
+    - Meta Business SDK Getting Started: https://developers.facebook.com/docs/business-sdk/getting-started/ :contentReference[oaicite:13]{index=13}.
+    - Marketing API Insights: https://developers.facebook.com/docs/marketing-api/insights/ :contentReference[oaicite:14]{index=14}.
+    - Lead Ads guide: https://developers.facebook.com/docs/marketing-api/guides/lead-ads/ :contentReference[oaicite:15]{index=15}.
+    - Graph API Page Insights: https://developers.facebook.com/docs/graph-api/reference/page/insights/ :contentReference[oaicite:16]{index=16}.
+    - OpenAI Chat Completion API: https://platform.openai.com/docs/api-reference/chat/create :contentReference[oaicite:17]{index=17}.
+    - OpenAI Images API: https://platform.openai.com/docs/api-reference/images/create :contentReference[oaicite:18]{index=18}.
+    - Attribution concepts: https://www.attributionapp.com/blog/revenue-attribution/ :contentReference[oaicite:19]{index=19}.
+    - Forecasting libraries: scikit-learn LinearRegression docs; Prophet docs.
+    - Airtable API: https://airtable.com/developers/web/api/introduction.
+    - Streamlit usage: https://docs.streamlit.io/.
+    - Slack Webhook integration: Slack docs.
+    - Scheduling approach: external cron or Replit scheduler guidelines.
+
+17. INNOVATIVE EXTENSIONS (optional, can scaffold later):
+    - Embedding-based clustering of ad copy: compute embeddings of past copy (via OpenAI Embeddings), cluster winners vs losers, feed patterns into prompt templates.
+    - LLM-assisted anomaly explanation and dynamic threshold adjustment.
+    - Automated creative prompt refinement based on sentiment analysis of ad comments via Graph API + LLM.
+    - Predictive “budget momentum” scaling: small auto-increases when performance trending up.
+    - Chat interface for voice or text queries about performance; UI triggers backend functions that summarize and respond with narrative + charts.
+    - Landing page personalization suggestions: generate personalized copy via LLM given audience segment.
+    - Auto-experiment generator: LLM suggests A/B test matrix; code scaffolds creation of new ad sets via SDK.
+    - Human-in-loop approval flows: present AI suggestions in UI with “Approve” buttons before executing.
+
+18. DELIVERY FORMAT
+    - Generate full folder structure and code files:
+      - config.py, fb_client.py, fetch_paid.py, fetch_organic.py, attribution.py, forecast.py, openai_client.py, auto_actions.py, anomaly.py, data_store.py, dashboard.py, requirements.txt, README.md, tests/.
+    - Include docstrings and comments referencing the citations above.
+    - Ensure code is modular, with clear import patterns.
+    - Use environment variables for secrets; never hard-code tokens.
+    - Provide sample unit tests (e.g., pytest) for key functions.
+    - Provide instructions in README on how to run locally vs on Replit, how to add Secrets, and how to schedule tasks.
+
+19. REVIEW & VALIDATION
+    - For each Meta API call generated, include a comment referencing the exact Graph Explorer-tested endpoint, e.g.:
+      # Tested in Graph Explorer: GET /act_{AD_ACCOUNT_ID}/insights?fields=impressions,clicks,spend&date_preset=last_7d
+    - For OpenAI prompts, include templates and examples.
+    - Ensure error handling catches token expiration (API returns code 190) and logs instructions to refresh token.
+    - Use feature flags to avoid breaking existing flows if environment not configured.
+    - Ensure the assistant outputs code only; do not execute any live write-actions without dry-run toggles.
+
+20. COMMUNICATION & STYLE
+    - Write code and comments in a natural, conversational tone with quick clever humor in comments where appropriate.
+    - Use a poetic but practical style in narrative functions (e.g., Chat Insights).
+    - Apply Gen Z–balanced language: friendly, mentor-like, but grounded.
+    - Emphasize innovation: name modules and functions clearly (e.g., “creative_lab”, “co_pilot_chat”).
+    - Use psychologically strategic defaults (e.g., dry-run defaults, safe timeouts).
+    - Keep functions small and testable.
+
+Please generate the complete codebase scaffold (file by file) according to the above spec. For each file, include imports, functions, classes as needed, comments referencing official docs URLs with citations. Ensure the structure can run on Replit with minimal manual edits: just add Secrets and run `streamlit run dashboard.py`. Provide a README.md summarizing setup steps, features, and how to extend. Include sample unit tests in a tests/ folder. Use relative imports and clear module boundaries. End with a brief note: “App scaffold generated—add your Secrets and run on Replit; review comments and citations before enabling auto-actions.” 
