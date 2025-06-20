@@ -224,9 +224,21 @@ def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
                     "creative_object_url": creative_object_url,
                 }
 
-                # Copy performance metrics from row
-                for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm', 'date_start', 'date_stop']:
-                    record[col] = row.get(col, 0)
+                # Copy performance metrics from row with safe conversion
+                for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm']:
+                    value = row.get(col, 0)
+                    if col in ['impressions', 'clicks', 'reach']:
+                        # Convert to int, handle strings
+                        record[col] = int(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0
+                    elif col in ['spend', 'frequency', 'ctr', 'cpc', 'cpm']:
+                        # Convert to float, handle strings
+                        record[col] = float(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0.0
+                    else:
+                        record[col] = value
+                
+                # Copy date fields as-is
+                for col in ['date_start', 'date_stop']:
+                    record[col] = row.get(col, None)
 
                 records.append(record)
 
@@ -246,8 +258,19 @@ def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
                 "creative_thumbnail_url": None,
                 "creative_object_url": None,
             }
-            for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm', 'date_start', 'date_stop']:
-                record[col] = row.get(col, 0)
+            # Copy performance metrics with safe conversion
+            for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm']:
+                value = row.get(col, 0)
+                if col in ['impressions', 'clicks', 'reach']:
+                    record[col] = int(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0
+                elif col in ['spend', 'frequency', 'ctr', 'cpc', 'cpm']:
+                    record[col] = float(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0.0
+                else:
+                    record[col] = value
+            
+            # Copy date fields as-is
+            for col in ['date_start', 'date_stop']:
+                record[col] = row.get(col, None)
             records.append(record)
 
     if not records:
@@ -311,10 +334,10 @@ def get_campaign_performance_summary(date_preset: str = "last_7d", campaign_ids:
                 performance_data['campaign_id'].isin(campaign_ids)
             ]
 
-        # Calculate summary metrics
-        total_spend = performance_data['spend'].astype(float).sum()
-        total_impressions = performance_data['impressions'].astype(int).sum()
-        total_clicks = performance_data['clicks'].astype(int).sum()
+        # Calculate summary metrics with proper type conversion
+        total_spend = pd.to_numeric(performance_data['spend'], errors='coerce').fillna(0).sum()
+        total_impressions = pd.to_numeric(performance_data['impressions'], errors='coerce').fillna(0).sum()
+        total_clicks = pd.to_numeric(performance_data['clicks'], errors='coerce').fillna(0).sum()
 
         average_ctr = (total_clicks / total_impressions * 100) if total_impressions > 0 else 0
         average_cpc = (total_spend / total_clicks) if total_clicks > 0 else 0
