@@ -1,0 +1,515 @@
+ou are a senior Python engineer, Instagram/Meta API expert, and UX/UI-savvy product thinker. Your job is to automatically patch and enhance our Replit Streamlit app’s Instagram insights module (mainly `fetch_organic.py` and `dashboard.py`), so that it discovers and surfaces a comprehensive, high-impact set of Instagram metrics (especially for Reels), uses the correct Meta Graph API nodes/endpoints to fetch metadata and insights, and delivers a highly optimized, user-friendly UI/UX for advanced performance marketing analysis. The prompt below is ready to copy-paste into an AI/Replit assistant to apply all changes in one pass.
+
+---
+## 1. Discovering and Expanding Available Instagram Metrics
+
+1. **Fetch Metrics Metadata Dynamically**  
+   - Implement a helper to call the Graph API metadata endpoints for IG media and IG user, so we can learn exactly which metrics are available for each media item or for the account. For example:
+     - For each media ID: GET `https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights/metadata?access_token={token}`. This returns the list of supported metric names and descriptions for that media.  
+     - For the IG User (business account): GET `https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/insights?metric=audience_gender_age,audience_country,...&period=day&access_token={token}` or metadata endpoint if available. Also GET `/{ig_user_id}/insights/metadata` if supported.  
+   - Cache these metadata results (per media type or per media ID) in a session-level dictionary so that when we run again, we know which metrics work without trial-and-error.  
+   - Log the discovered metric names (e.g. “Media 12345 supports metrics: impressions, reach, video_views, plays, total_interactions, saved, comments, shares, profile_visits, follows, ig_reels_avg_watch_time, ig_reels_video_view_total_time, clips_replays_count, ig_reels_aggregated_all_plays_count, navigation, etc.”).
+
+2. **Tailored Metric Sets by Media Type / Product Type**  
+   - After fetching metadata, automatically choose all high-impact metrics supported for that media item. For Reels: include all Reel-specific metrics returned by metadata (e.g. avg watch time, total play time, plays, aggregated plays, etc.), plus engagement metrics (likes/comments/shares/saves), reach/impressions if supported, profile visits, follows, navigation actions.  
+   - For VIDEO posts: include video_views, plays, reach/impressions if available, engagement metrics, saved, comments, shares, profile visits.  
+   - For IMAGE posts: include reach/impressions if available, engagement metrics (total_interactions or sum of likes/comments/shares), saved, comments, shares, profile visits.  
+   - For CAROUSEL: fetch metadata and pick metrics that apply (often aggregated metrics like reach, engagement, saved; and if child items contain video, include video_views metrics). Optionally, if feasible, fetch child media individually for deeper metrics, but at minimum use aggregated metrics from metadata.  
+   - For any new media types introduced, rely on metadata to drive the metric list dynamically rather than hard-coding too narrowly.  
+   - Maintain a session-level or persistent cache mapping `(media_product_type or media_type) -> supported_metric_list`, so repeated runs skip metadata calls or retry logic.
+
+3. **Iterative Retry Removal of Unsupported Metrics**  
+   - If metadata endpoint is not available or incomplete, fall back to the previous iterative approach: start with a broad candidate list, attempt GET `/{media_id}/insights?metric=...`, on 400 parse error message to remove exactly the unsupported metric, retry until no unsupported remain. But prefer using metadata when possible.  
+   - Log all removals: “Media 123 removed unsupported metric ‘impressions’, kept [reach, total_interactions, video_views, …]”.
+
+4. **IG User-Level Insights for Context**  
+   - Fetch IG user follower count once per session: GET `/{ig_user_id}?fields=followers_count&access_token={token}`. Cache this value in-memory for computing engagement rates.  
+   - Optionally fetch other user-level metrics (profile_views, website_clicks, email_contacts, call_to_action_clicks) via GET `/{ig_user_id}/insights?metric=profile_views,website_clicks,email_contacts,call_to_action_clicks&period=lifetime&access_token={token}`, to give broader context on account-level performance.
+
+---
+## 2. Enhanced fetch_organic.py Implementation
+
+- **Imports and Globals**:
+  ```python
+  import os, requests, logging, pandas as pd
+  from datetime import date, timedelta
+  logger = logging.getLogger(__name__)
+  GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v25.0")  # or current stable
+  GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+  # Caches for session
+  _media_metrics_cache = {}          # key: media_type or media_id, value: [metrics]
+  _ig_user_followers = None          # cache follower count
+  _ig_media_metadata_cache = {}      # key: media_id, value: metadata dict (supported metrics)
+Helper: fetch IG user follower count:
+def get_ig_follower_count(ig_user_id):
+    global _ig_user_followers
+    if _ig_user_followers is not None:
+        return _ig_user_followers
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    if not ig_user_id or not token:
+        logger.warning("Missing IG_USER_ID or token for follower count.")
+        return None
+    url = f"{GRAPH_API_BASE}/{ig_user_id}"
+    params = {"fields": "followers_count", "access_token": token}
+    try:
+        resp = requests.get(url, params=params)
+        body = resp.json()
+        if resp.status_code == 200 and "followers_count" in body:
+            _ig_user_followers = body["followers_count"]
+            logger.info(f"Fetched IG follower count: {_ig_user_followers}")
+            return _ig_user_followers
+        else:
+            logger.warning(f"Failed to fetch follower count: {body}")
+    except Exception as e:
+        logger.error(f"Error fetching IG follower count: {e}", exc_info=True)
+    return None
+Helper: fetch media metadata:
+def fetch_media_insights_metadata(media_id):
+    # Returns a list of supported metric names for this media_id
+    if media_id in _ig_media_metadata_cache:
+        return _ig_media_metadata_cache[media_id]
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    if not token:
+        logger.warning("Missing token for media metadata.")
+        return []
+    url = f"{GRAPH_API_BASE}/{media_id}/insights/metadata"
+    try:
+        resp = requests.get(url, params={"access_token": token})
+        body = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {}
+        if resp.status_code == 200 and "data" in body:
+            metrics = [item.get("name") for item in body["data"] if item.get("name")]
+            logger.info(f"Media {media_id} supports metrics: {metrics}")
+            _ig_media_metadata_cache[media_id] = metrics
+            return metrics
+        else:
+            logger.warning(f"Metadata fetch failed for media {media_id}: {body}")
+    except Exception as e:
+        logger.error(f"Exception fetching metadata for media {media_id}: {e}", exc_info=True)
+    _ig_media_metadata_cache[media_id] = []
+    return []
+Helper: choose tailored metrics:
+def choose_metrics_for_media(media):
+    """
+    media: dict with keys id, media_type, media_product_type, timestamp, etc.
+    Returns: list of metric names supported and high-impact.
+    """
+    media_id = media.get("id")
+    media_type = media.get("media_type","").upper() or None
+    product_type = media.get("media_product_type","").upper() or ""
+    # Try metadata first
+    supported = fetch_media_insights_metadata(media_id)
+    if supported:
+        # Filter for high-impact: define priority groups
+        chosen = []
+        # Engagement metrics often include: likes, comments, shares, saved, total_interactions
+        for m in ["total_interactions","likes","comments","shares","saved"]:
+            if m in supported: chosen.append(m)
+        # Reach/impr if available
+        for m in ["impressions","reach"]:
+            if m in supported: chosen.append(m)
+        # Video/reel specific
+        if "VIDEO" in media_type or "REEL" in product_type or "REEL" in media_type:
+            for m in ["video_views","plays","profile_visits","follows","navigation"]:
+                if m in supported and m not in chosen: chosen.append(m)
+            # Reel deeper metrics
+            for m in ["ig_reels_video_view_total_time","ig_reels_avg_watch_time","clips_replays_count","ig_reels_aggregated_all_plays_count"]:
+                if m in supported and m not in chosen: chosen.append(m)
+        # Other possible metrics
+        for m in ["engagement","saved","saved"]:  # engagement sometimes alias
+            if m in supported and m not in chosen: chosen.append(m)
+        # Remove duplicates, keep original order
+        seen = set()
+        final = [m for m in chosen if not (m in seen or seen.add(m))]
+        logger.info(f"Chosen metrics for media {media_id} ({media_type}/{product_type}): {final}")
+        return final
+    # Fallback list if metadata empty: base on type
+    fallback = []
+    if "REEL" in product_type or media_type=="VIDEO":
+        fallback = ["reach","video_views","total_interactions"]
+    elif media_type=="IMAGE":
+        fallback = ["reach","total_interactions"]
+    elif media_type=="CAROUSEL_ALBUM":
+        fallback = ["reach","total_interactions"]
+    else:
+        fallback = ["reach","total_interactions"]
+    logger.info(f"No metadata for media {media_id}, using fallback metrics: {fallback}")
+    return fallback
+Helper: fetch insights for one media in long format:
+def fetch_insights_for_media(media):
+    """
+    media: dict item from /{ig_user_id}/media with fields id, timestamp, caption, media_type, media_product_type, media_url, permalink, thumbnail_url.
+    Returns: list of records: each is dict with media fields + metric + value.
+    """
+    media_id = media.get("id")
+    ts = media.get("timestamp")
+    caption = media.get("caption")
+    media_url = media.get("media_url")
+    permalink = media.get("permalink")
+    thumbnail_url = media.get("thumbnail_url")
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    records = []
+    metrics = choose_metrics_for_media(media)
+    if not metrics:
+        return records
+    # Iterative removal approach if metadata incomplete
+    to_try = metrics.copy()
+    while to_try:
+        metric_str = ",".join(to_try)
+        url = f"{GRAPH_API_BASE}/{media_id}/insights"
+        params = {"metric": metric_str, "access_token": token}
+        try:
+            resp = requests.get(url, params=params)
+            body = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {}
+        except Exception as e:
+            logger.warning(f"Exception fetching insights for media {media_id}: {e}", exc_info=True)
+            break
+        if resp.status_code == 200 and "data" in body:
+            for mobj in body["data"]:
+                name = mobj.get("name")
+                vals = mobj.get("values", [])
+                if vals:
+                    # use last value or sum over period if list?
+                    value = vals[-1].get("value")
+                    records.append({
+                        "media_id": media_id,
+                        "timestamp": ts,
+                        "caption": caption,
+                        "media_url": media_url,
+                        "permalink": permalink,
+                        "thumbnail_url": thumbnail_url,
+                        "metric": name,
+                        "value": value
+                    })
+            logger.info(f"Fetched {len(records)} metric rows for media {media_id}")
+            break
+        # If 400 unsupported metric error, remove unsupported and retry
+        if resp.status_code == 400 and "error" in body:
+            msg = body["error"].get("message","")
+            # find which metric name appears in message
+            removed = None
+            for m in to_try:
+                if m in msg:
+                    removed = m
+                    break
+            if removed:
+                to_try.remove(removed)
+                logger.info(f"Media {media_id}: removed unsupported metric '{removed}', retrying with {to_try}")
+                continue
+        logger.warning(f"Insights fetch error for media {media_id}: status {resp.status_code}, {body}")
+        break
+    return records
+Main: fetch_ig_media_insights:
+def fetch_ig_media_insights(ig_user_id, since=None, until=None):
+    """
+    Returns a long-format DataFrame with columns:
+    ['media_id','timestamp','caption','media_url','permalink','thumbnail_url','metric','value'].
+    """
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    if not ig_user_id or not token:
+        logger.error("Missing IG_USER_ID or token in fetch_ig_media_insights.")
+        return pd.DataFrame(columns=['media_id','timestamp','caption','media_url','permalink','thumbnail_url','metric','value'])
+    # 1. Fetch media list with pagination
+    url = f"{GRAPH_API_BASE}/{ig_user_id}/media"
+    params = {"fields": "id,caption,timestamp,media_type,media_product_type,media_url,permalink,thumbnail_url", "access_token": token, "limit": 100}
+    media_items = []
+    try:
+        while url:
+            resp = requests.get(url, params=params)
+            body = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {}
+            if resp.status_code != 200 or "error" in body:
+                logger.error(f"Error fetching IG media list: {body}")
+                break
+            data = body.get("data", [])
+            media_items.extend(data)
+            paging = body.get("paging", {})
+            url = paging.get("next")
+            params = None
+    except Exception as e:
+        logger.error(f"Exception fetching IG media list: {e}", exc_info=True)
+        return pd.DataFrame(columns=['media_id','timestamp','caption','media_url','permalink','thumbnail_url','metric','value'])
+    logger.info(f"Found {len(media_items)} Instagram media items")
+    # 2. Filter by date if requested
+    filtered = []
+    for media in media_items:
+        ts = media.get("timestamp")
+        if since or until:
+            date_str = ts.split("T")[0] if ts else None
+            if since and date_str and date_str < since: continue
+            if until and date_str and date_str > until: continue
+        filtered.append(media)
+    logger.info(f"{len(filtered)}/{len(media_items)} media items after date filter")
+    # 3. Fetch for each media
+    all_records = []
+    for media in filtered:
+        recs = fetch_insights_for_media(media)
+        all_records.extend(recs)
+    if not all_records:
+        logger.warning("No IG media insights returned.")
+        return pd.DataFrame(columns=['media_id','timestamp','caption','media_url','permalink','thumbnail_url','metric','value'])
+    df = pd.DataFrame(all_records)
+    logger.info(f"Successfully fetched {len(df)} Instagram insights records in long format")
+    return df
+Helper: fetch_latest_ig_media_insights:
+def fetch_latest_ig_media_insights(ig_user_id):
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    return fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday)
+Test block:
+if __name__ == "__main__":
+    import os
+    os.environ.setdefault("PAGE_ACCESS_TOKEN", "<your_page_token>")
+    os.environ.setdefault("IG_USER_ID", "<your_ig_user_id>")
+    df = fetch_latest_ig_media_insights(os.getenv("IG_USER_ID"))
+    print(df.head())
+    print("Columns:", df.columns.tolist())
+    # Test follower count
+    cnt = get_ig_follower_count(os.getenv("IG_USER_ID"))
+    print("Follower count:", cnt)
+3. UI/UX Improvements in dashboard.py
+
+Imports & setup:
+import os, logging
+import streamlit as st
+import matplotlib.pyplot as plt
+import pandas as pd
+from datetime import date, timedelta
+from fetch_organic import fetch_ig_media_insights, fetch_latest_ig_media_insights, get_ig_follower_count
+logging.basicConfig(level=logging.INFO)
+Env check:
+def check_env():
+    required = ["PAGE_ACCESS_TOKEN","IG_USER_ID"]
+    missing = [k for k in required if not os.getenv(k)]
+    if missing:
+        st.error(f"Missing environment variables: {missing}. Please set a valid Page Access Token with instagram_basic & instagram_manage_insights, and IG_USER_ID.")
+        st.stop()
+Caching:
+@st.cache_data(ttl=600)
+def cached_ig(ig_user_id, since_str, until_str):
+    return fetch_ig_media_insights(ig_user_id, since=since_str, until=until_str)
+Instagram Insights Section:
+def show_instagram_insights():
+    st.header("📸 Instagram Media Insights & Advanced Analysis")
+    ig_user_id = os.getenv("IG_USER_ID")
+    check_env()
+    # Date inputs
+    col1, col2 = st.columns(2)
+    with col1:
+        since_date = st.date_input("Since", value=(date.today() - timedelta(days=30)))
+    with col2:
+        until_date = st.date_input("Until", value=(date.today() - timedelta(days=1)))
+    if st.button("Fetch Instagram Data"):
+        since_str = since_date.strftime("%Y-%m-%d")
+        until_str = until_date.strftime("%Y-%m-%d")
+        df = cached_ig(ig_user_id, since_str, until_str)
+        if df.empty:
+            st.warning("No Instagram insights for this range or insufficient permissions. Check token & IG Business linkage.")
+            return
+        # 1. List available metrics
+        metrics = sorted(df['metric'].unique().tolist())
+        st.info(f"Available metrics: {metrics}")
+        # 2. Build selectable post list: show unique media with date, type, snippet
+        uniq = df[['media_id','timestamp','caption','media_url','permalink','thumbnail_url']].drop_duplicates(subset=['media_id'])
+        # Annotate type from the URL or from previous fetch? Could store media_type in DataFrame optionally.
+        # For now, infer type from preview URL extension or include in label if available.
+        options = {}
+        for _, row in uniq.iterrows():
+            mid = row['media_id']
+            ts = row['timestamp'].split("T")[0]
+            snippet = (row.get('caption') or "").replace("\n"," ")[:50]
+            label = f"{ts}: {snippet}..."
+            options[mid] = label
+        sel_id = st.selectbox("Select post to inspect", options.keys(), format_func=lambda x: options[x])
+        sel_media = uniq[uniq['media_id']==sel_id].iloc[0]
+        # 3. Preview + basic metrics
+        # Use a container to avoid nested columns deeper than one level
+        with st.container():
+            st.subheader("Preview & Basic Metrics")
+            col_img, col_info = st.columns([1,2])
+            # Left: preview
+            with col_img:
+                url = sel_media.get('media_url') or sel_media.get('thumbnail_url')
+                if url:
+                    # Determine if video (common extensions or from metadata)
+                    if any(url.lower().endswith(ext) for ext in ['.mp4','.mov','.webm']):
+                        st.video(url)
+                    else:
+                        st.image(url, use_column_width=True)
+                else:
+                    st.write("No preview available")
+                # Link to Instagram
+                perm = sel_media.get('permalink')
+                if perm:
+                    st.markdown(f"[View on Instagram]({perm})")
+            # Right: raw metrics table
+            with col_info:
+                st.write(f"**Caption:** {sel_media.get('caption') or '—'}")
+                df_sel = df[df['media_id']==sel_id][['metric','value']].set_index('metric')
+                st.dataframe(df_sel, use_container_width=True)
+        # 4. Compute KPIs
+        with st.expander("🔍 Computed KPIs & Engagement Analysis", expanded=True):
+            follower_count = get_ig_follower_count(ig_user_id)
+            df_sel = df[df['media_id']==sel_id]
+            # Convert to dict for easy lookup
+            metrics_map = df_sel.set_index('metric')['value'].to_dict()
+            # Engagement rate: total_interactions / followers
+            total_int = metrics_map.get('total_interactions') or (metrics_map.get('engagement') or 0)
+            reach = metrics_map.get('reach') or metrics_map.get('impressions') or None
+            impressions = metrics_map.get('impressions')
+            eng_rate = None
+            if follower_count and total_int is not None:
+                eng_rate = total_int / follower_count
+            elif reach:
+                eng_rate = total_int / reach if reach else None
+            # Save, comment, share rates
+            save = metrics_map.get('saved') or 0
+            comments = metrics_map.get('comments') or 0
+            shares = metrics_map.get('shares') or 0
+            save_rate = (save / impressions) if impressions else None
+            comment_rate = (comments / impressions) if impressions else None
+            share_rate = (shares / impressions) if impressions else None
+            # Video metrics
+            video_views = metrics_map.get('video_views') or 0
+            view_rate = (video_views / reach) if reach else None
+            # Reel watch-time
+            avg_watch = metrics_map.get('ig_reels_avg_watch_time')
+            total_watch = metrics_map.get('ig_reels_video_view_total_time')
+            # Display KPIs
+            st.markdown("**Engagement / Interaction Rates**")
+            cols = st.columns(3)
+            cols[0].metric("Engagement Rate", f"{eng_rate:.2%}" if eng_rate is not None else "N/A")
+            cols[1].metric("Save Rate", f"{save_rate:.2%}" if save_rate is not None else "N/A")
+            cols[2].metric("Comment Rate", f"{comment_rate:.2%}" if comment_rate is not None else "N/A")
+            cols2 = st.columns(3)
+            cols2[0].metric("Share Rate", f"{share_rate:.2%}" if share_rate is not None else "N/A")
+            cols2[1].metric("View Rate", f"{view_rate:.2%}" if view_rate is not None else "N/A")
+            if avg_watch:
+                cols2[2].metric("Avg Watch Time", f"{avg_watch}s")
+            # Additional metrics
+            if follower_count:
+                st.write(f"Follower count at fetch: {follower_count}")
+            # 5. Historical comparison & trends
+            st.markdown("**Historical Comparison**")
+            # Build historical DataFrame of previous posts (all media)
+            df_all = df.copy()
+            # Extract date column
+            df_all['date'] = pd.to_datetime(df_all['timestamp']).dt.date
+            # Compute engagement rate for each media in range
+            hist = []
+            for mid, group in df_all.groupby('media_id'):
+                mm = group.set_index('metric')['value'].to_dict()
+                t_int = mm.get('total_interactions') or mm.get('engagement') or 0
+                rch = mm.get('reach') or mm.get('impressions') or None
+                fcnt = follower_count or None
+                if fcnt:
+                    er = t_int / fcnt
+                elif rch:
+                    er = t_int / rch if rch else None
+                else:
+                    er = None
+                hist.append({"media_id": mid, "engagement_rate": er, "date": group.iloc[0]['timestamp'].split("T")[0]})
+            hist_df = pd.DataFrame(hist).dropna(subset=['engagement_rate'])
+            if not hist_df.empty:
+                avg_er = hist_df['engagement_rate'].mean()
+                curr_er = eng_rate
+                delta = curr_er - avg_er if curr_er is not None else None
+                pct = (delta/avg_er*100) if avg_er and curr_er is not None else None
+                if pct is not None:
+                    if pct >= 0:
+                        st.success(f"This post’s engagement rate is {pct:.1f}% above the average of last {len(hist_df)} posts.")
+                    else:
+                        st.warning(f"This post’s engagement rate is {abs(pct):.1f}% below the average of last {len(hist_df)} posts.")
+                # Optimal posting time suggestion
+                # Aggregate by weekday/hour if timestamp available
+                try:
+                    df_all['dt'] = pd.to_datetime(df_all['timestamp'])
+                    df_all['weekday'] = df_all['dt'].dt.day_name()
+                    df_all['hour'] = df_all['dt'].dt.hour
+                    # Compute avg engagement rate by weekday
+                    summary = []
+                    for (wd,h), grp in df_all.groupby(['weekday','hour']):
+                        # take first metric group for each media
+                        # For simplicity, reuse hist: find media_ids at this wd,h
+                        mids = grp['media_id'].unique()
+                        ers = []
+                        for mid in mids:
+                            mm = grp[grp['media_id']==mid].set_index('metric')['value'].to_dict()
+                            t_int2 = mm.get('total_interactions') or mm.get('engagement') or 0
+                            rch2 = mm.get('reach') or mm.get('impressions') or None
+                            if follower_count:
+                                er2 = t_int2 / follower_count
+                            elif rch2:
+                                er2 = t_int2 / rch2 if rch2 else None
+                            else:
+                                er2 = None
+                            if er2 is not None:
+                                ers.append(er2)
+                        if ers:
+                            summary.append({"weekday": wd, "hour": h, "avg_er": sum(ers)/len(ers)})
+                    summary_df = pd.DataFrame(summary)
+                    if not summary_df.empty:
+                        # Find top weekday/hour
+                        best = summary_df.loc[summary_df['avg_er'].idxmax()]
+                        st.info(f"Historically, posting on {best['weekday']} around {int(best['hour'])}:00 has given highest avg engagement rate.")
+                except Exception:
+                    pass
+            else:
+                st.info("Not enough historical data to compare engagement rates.")
+            # 6. Caption analysis
+            st.markdown("**Caption Analysis**")
+            caption = sel_media.get('caption') or ""
+            hashtag_count = caption.count("#")
+            emoji_count = sum(1 for ch in caption if ch in "😀😂😍👍🔥✨💕🎉😊😎")  # simplistic list
+            word_count = len(caption.split())
+            st.write(f"Length: {word_count} words; {hashtag_count} hashtags; ~{emoji_count} emojis.")
+            # 7. AI-generated commentary (optional)
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                with st.expander("🧠 AI Commentary & Recommendations"):
+                    # Build a concise prompt
+                    prompt = (
+                        f"Instagram post dated {sel_media.get('timestamp')}. "
+                        f"Caption: \"{caption[:100]}...\". "
+                        f"Metrics: {metrics_map}. "
+                        f"Follower count: {follower_count}. "
+                        "Provide 2-3 actionable marketing recommendations to improve engagement, reach, and growth."
+                    )
+                    # Call OpenAI (pseudocode; replace with actual client)
+                    try:
+                        from openai import OpenAI
+                        client = OpenAI(api_key=openai_key)
+                        resp = client.chat.create(model="gpt-4", messages=[{"role":"user","content":prompt}])
+                        advice = resp.choices[0].message.content
+                        st.write(advice)
+                    except Exception as e:
+                        st.warning(f"AI commentary failed: {e}")
+        # 8. Aggregate Trend Charts
+        with st.expander("📈 Instagram Trends Over Time", expanded=False):
+            df_all2 = df.copy()
+            df_all2['date'] = pd.to_datetime(df_all2['timestamp']).dt.date.astype(str)
+            # Pivot by date for selected metrics
+            metrics_all = df_all2['metric'].unique().tolist()
+            chosen = st.multiselect("Select metrics to plot", metrics_all, default=[m for m in ["reach","total_interactions"] if m in metrics_all])
+            if chosen:
+                pivot = df_all2.pivot_table(index='date', columns='metric', values='value', aggfunc='sum').reset_index()
+                fig, ax = plt.subplots(figsize=(8,4))
+                for m in chosen:
+                    if m in pivot:
+                        ax.plot(pivot['date'], pivot[m], marker='o', label=m)
+                ax.set_xticklabels(pivot['date'], rotation=45, ha='right')
+                ax.set_ylabel("Value")
+                ax.set_title("Instagram Performance Trends")
+                ax.legend()
+                st.pyplot(fig)
+Integration in main():
+def main():
+    st.set_page_config(page_title="AI-Powered Social Campaign Optimizer", layout="wide")
+    show_instagram_insights()
+if __name__=="__main__":
+    main()
+Avoid deep nested columns: every st.columns is called at top level or within a single with st.container():. Use st.expander() for grouping deeper details instead of nested columns within columns.
+Notes:
+Ensure that metadata endpoints exist in your Graph API version. If metadata endpoint returns “invalid metric” errors, fallback to trial-and-error approach but cache supported metrics per media ID/type.
+For performance, limit historical date range or add pagination controls in UI (e.g., “Fetch last N posts”).
+Use clear labels, rotate axes, annotate bars. Use consistent figure sizes.
+If Reel previews are not appearing: confirm that media_url or thumbnail_url fields include playable URLs. Use st.video() for video content. If thumbnail only, show thumbnail with “View on Instagram” link.
+Collect all possible high-impact metrics: use metadata to find names. Common IG user-level metrics: impressions, reach, profile_views, website_clicks, email_contacts, reach_by_age_gender, etc.—but some require different endpoints; include code to fetch user-level insights separately if desired.
+In footer or sidebar, show “Instagram insights enhanced: using metadata-driven metrics discovery, advanced KPIs, AI recommendations, posting-time analysis, caption analysis.”
