@@ -90,7 +90,7 @@ def main():
         from data_store import data_store
         from fb_client import fb_client
         from fetch_paid import get_campaign_performance, get_campaign_performance_summary
-        from fetch_organic import get_organic_insights, get_organic_performance_summary
+        from fetch_organic import get_organic_insights, get_organic_performance_summary, fetch_latest_ig_media_insights
         from anomaly import detect_anomalies
         from auto_actions import validate_automation_safety
         from config import config
@@ -222,7 +222,8 @@ def main():
             try:
                 from fetch_organic import (
                     validate_organic_environment, ORGANIC_DATE_PRESETS, 
-                    get_available_page_metrics, get_valid_instagram_metrics
+                    get_available_page_metrics, get_valid_instagram_metrics,
+                    fetch_latest_ig_media_insights
                 )
                 organic_validation = validate_organic_environment()
                 
