@@ -1,0 +1,65 @@
+You are a senior Python engineer and Facebook API expert working in a Replit environment. We need to update our Instagram insights fetch and dashboard code:
+
+1. **Context**:
+   - Our current function `fetch_ig_media_insights(ig_user_id, since=None, until=None, metrics=None)` returns a wide-format DataFrame: one row per media item with columns for each metric (e.g. “impressions”, “reach”, etc.).
+   - Downstream dashboard code expects a long-format DataFrame with columns `['media_id', 'timestamp', 'caption', 'metric', 'value']`, so it can filter by `ig_data['metric']`.
+   - We also want robust handling: filter requested metrics against a valid set, retry per-media when a metric is unsupported, and return an empty DataFrame with the correct columns if fetch fails or metrics list is empty.
+   - Additionally, define and export a helper `fetch_latest_ig_media_insights(ig_user_id, metrics=None)` that calls the above for yesterday’s date.
+
+2. **Task**:
+   - Patch or rewrite `fetch_ig_media_insights` so that:
+     - It takes `ig_user_id`, optional `since`/`until` date strings (“YYYY-MM-DD”), optional `metrics` list.
+     - If `metrics` is None, default to a safe subset like `["impressions","reach","total_interactions"]`.
+     - Filter `metrics` against a constant `VALID_IG_METRICS` set.
+     - Fetch the media list via Graph API: `GET /{ig_user_id}/media?fields=id,caption,timestamp,media_type,media_product_type&access_token=...`.
+     - For each media item in the date range, request insights via `GET /{media_id}/insights?metric=<comma-separated metrics>&access_token=...`.
+       - If response is 200 and includes data, extract each metric’s last value and append a row to a list of records with keys `media_id`, `timestamp`, `caption`, `metric`, `value`.
+       - If response is 400 indicating an unsupported metric for this media (e.g. error message “does not support the impressions metric for this media product type”), detect which metric caused the error (by checking if the metric name appears in the error message), remove it from the per-media metrics list, and retry once with remaining metrics. Repeat until no metrics remain or request succeeds.
+       - On other errors or after exhausting metrics, skip that media item.
+     - After processing all media, build a pandas DataFrame from the records list. If empty, return `pd.DataFrame(columns=['media_id','timestamp','caption','metric','value'])`.
+     - Include proper logging (using Python’s `logging`): log initial valid metrics, per-media removals of unsupported metrics, warnings on fetch errors, and an info log if no insights returned.
+     - Use constants at top: 
+       ```python
+       GRAPH_API_VERSION = "v23.0"
+       GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+       VALID_IG_METRICS = { "impressions", "reach", "replies", "saved", "video_views", "likes", "comments", "shares", "plays", "total_interactions", "follows", "profile_visits", "profile_activity", "navigation", "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count", "views" }
+       ```
+   - Add a helper `fetch_latest_ig_media_insights(ig_user_id, metrics=None)` that computes yesterday’s date string via `datetime.date.today() - timedelta(days=1)`, logs it, and calls `fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday, metrics=metrics)`.
+   - Ensure the function returns a DataFrame with the exact columns `['media_id','timestamp','caption','metric','value']`.
+   - Update or provide example usage in the dashboard:
+     - After calling `fetch_ig_media_insights`, check if DataFrame is empty. If not empty, you can filter like:
+       ```python
+       ig_data = fetch_ig_media_insights(ig_user_id, since=since_str, until=until_str, metrics=["impressions","reach"])
+       if not ig_data.empty:
+           # ig_data is long-format
+           ig_impressions = ig_data[ig_data['metric'] == 'impressions']
+           # pivot or display as needed, e.g.:
+           pivot_imp = ig_impressions.pivot(index='media_id', columns='timestamp', values='value').fillna(0)
+           st.dataframe(pivot_imp)
+       ```
+     - Show how to select a single media_id and display all metrics:
+       ```python
+       media_ids = ig_data['media_id'].unique().tolist()
+       chosen = st.selectbox("Select media_id", media_ids)
+       df_media = ig_data[ig_data['media_id'] == chosen]
+       st.dataframe(df_media[['metric','value','timestamp']])
+       ```
+   - Include a quick test snippet at the bottom of the module for interactive REPL testing:
+     ```python
+     if __name__ == "__main__":
+         import os
+         os.environ["PAGE_ACCESS_TOKEN"] = "<your_page_token>"
+         os.environ["IG_USER_ID"] = "<your_ig_user_id>"
+         df_test = fetch_latest_ig_media_insights(os.getenv("IG_USER_ID"), metrics=["impressions","reach"])
+         print(df_test.head())
+         print("Columns:", df_test.columns.tolist())
+     ```
+   - Use conversational but precise comments in the code, referencing official docs URLs:
+     - Above the function: `# Official docs: https://developers.facebook.com/docs/instagram-api/guides/insights/`
+     - Comments explaining per-media retry logic.
+
+3. **Deliverable**:
+   - Provide the full updated Python function code (`fetch_ig_media_insights` and `fetch_latest_ig_media_insights`).
+   - Provide an example snippet for the dashboard showing how to filter on `ig_data['metric']` in long format.
+   - Ensure the code is self-contained: imports, constants, logging setup assumed to exist.
+
