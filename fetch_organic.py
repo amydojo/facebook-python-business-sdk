@@ -1,3 +1,4 @@
+
 """
 Enhanced fetch organic content insights from Facebook Pages and Instagram.
 Handles comprehensive Instagram Business Account insights with metadata-driven discovery.
@@ -46,35 +47,30 @@ FALLBACK_PAGE_METRICS = [
     "page_fan_removes"
 ]
 
-# Comprehensive Instagram metrics for Graph API - organized by category
-VALID_IG_METRICS = {
-    # Core engagement metrics
-    "impressions", "reach", "likes", "comments", "shares", "saves", "saved",
-    "total_interactions", "replies", "follows", "profile_visits", "profile_activity",
-
-    # Video metrics (general)
-    "video_views", "plays", "views",
-
-    # Reels-specific metrics (comprehensive)
-    "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", 
-    "clips_replays_count", "ig_reels_aggregated_all_plays_count",
-    "ig_reels_plays", "ig_reels_reach", "ig_reels_impressions",
-    "ig_reels_likes", "ig_reels_comments", "ig_reels_shares",
-    "ig_reels_saves", "ig_reels_total_interactions",
-
-    # Story metrics
-    "taps_forward", "taps_back", "exits", "replies",
-
-    # Navigation metrics
-    "navigation",
-
-    # Additional engagement
-    "website_clicks", "get_directions_clicks", "text_message_clicks",
-    "email_contacts", "phone_call_clicks", "engagement"
+# Updated Instagram metrics for 2025 - removing deprecated metrics
+FALLBACK_IG_METRICS = {
+    # Core engagement metrics (most reliable)
+    "reach": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "total_interactions": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "comments": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "shares": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "saved": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "profile_visits": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "follows": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    
+    # Video/Reels specific metrics (updated for 2025)
+    "video_views": ["VIDEO"],
+    "ig_reels_avg_watch_time": ["REEL"],
+    "ig_reels_video_view_total_time": ["REEL"],
+    "clips_replays_count": ["REEL"],
+    "ig_reels_aggregated_all_plays_count": ["REEL"],
+    
+    # Navigation and interaction metrics
+    "navigation": ["REEL", "VIDEO"],
+    "website_clicks": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "email_contacts": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+    "phone_call_clicks": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
 }
-
-# Enhanced default Instagram metrics including Reels
-DEFAULT_IG_METRICS = ['impressions', 'reach', 'total_interactions', 'plays', 'ig_reels_plays']
 
 def get_page_access_token():
     """
@@ -130,7 +126,7 @@ def get_ig_follower_count(ig_user_id: str) -> Optional[int]:
     if _ig_user_followers is not None:
         return _ig_user_followers
 
-    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    token, _ = get_page_access_token()
     if not ig_user_id or not token:
         logger.warning("Missing IG_USER_ID or token for follower count.")
         return None
@@ -139,8 +135,11 @@ def get_ig_follower_count(ig_user_id: str) -> Optional[int]:
     params = {"fields": "followers_count", "access_token": token}
 
     try:
+        logger.info(f"Fetching follower count from: {url}")
         resp = requests.get(url, params=params, timeout=10)
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+        
+        logger.info(f"Follower count API response: status={resp.status_code}, body={body}")
 
         if resp.status_code == 200 and "followers_count" in body:
             _ig_user_followers = body["followers_count"]
@@ -154,7 +153,7 @@ def get_ig_follower_count(ig_user_id: str) -> Optional[int]:
 
     return None
 
-def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: str = "day") -> Dict:
+def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: str = "lifetime") -> Dict:
     """
     Fetch Instagram Business Account user-level insights.
 
@@ -173,7 +172,7 @@ def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: s
     if cache_key in _ig_user_insights_cache:
         return _ig_user_insights_cache[cache_key]
 
-    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    token, _ = get_page_access_token()
     if not ig_user_id or not token:
         logger.warning("Missing IG_USER_ID or token for user insights.")
         return {}
@@ -186,8 +185,11 @@ def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: s
     }
 
     try:
+        logger.info(f"Fetching user insights from: {url} with params: {params}")
         resp = requests.get(url, params=params, timeout=10)
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+        
+        logger.info(f"User insights API response: status={resp.status_code}, body={body}")
 
         if resp.status_code == 200 and "data" in body:
             insights = {}
@@ -221,7 +223,7 @@ def fetch_media_insights_metadata(media_id: str) -> List[str]:
     if media_id in _ig_media_metadata_cache:
         return _ig_media_metadata_cache[media_id]
 
-    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    token, _ = get_page_access_token()
     if not token:
         logger.warning("Missing token for media metadata.")
         return []
@@ -229,8 +231,11 @@ def fetch_media_insights_metadata(media_id: str) -> List[str]:
     url = f"{GRAPH_API_BASE}/{media_id}/insights/metadata"
 
     try:
+        logger.info(f"Fetching metadata from: {url}")
         resp = requests.get(url, params={"access_token": token}, timeout=10)
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+        
+        logger.info(f"Metadata API response: status={resp.status_code}, body={body}")
 
         if resp.status_code == 200 and "data" in body:
             metrics = [item.get("name") for item in body["data"] if item.get("name")]
@@ -238,7 +243,7 @@ def fetch_media_insights_metadata(media_id: str) -> List[str]:
             _ig_media_metadata_cache[media_id] = metrics
             return metrics
         else:
-            logger.info(f"⚠️ Metadata fetch not available for media {media_id}, using fallback approach")
+            logger.info(f"⚠️ Metadata fetch not available for media {media_id}: {body}")
 
     except Exception as e:
         logger.debug(f"Metadata fetch failed for media {media_id}: {e}")
@@ -268,55 +273,57 @@ def choose_metrics_for_media(media: Dict) -> List[str]:
         chosen = []
 
         # Core engagement metrics (highest priority)
-        for metric in ["total_interactions", "likes", "comments", "shares", "saves", "saved"]:
-            if metric in supported:
-                chosen.append(metric)
-
-        # Reach/impressions (essential for KPI calculation)
-        for metric in ["impressions", "reach"]:
+        for metric in ["total_interactions", "reach", "comments", "shares", "saved"]:
             if metric in supported:
                 chosen.append(metric)
 
         # Video/Reels specific metrics
-        if "VIDEO" in media_type or "REEL" in product_type:
-            video_metrics = [
-                "video_views", "plays", "profile_visits", "follows", "navigation",
-                "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", 
+        if "REEL" in product_type:
+            reel_metrics = [
+                "ig_reels_avg_watch_time", "ig_reels_video_view_total_time", 
                 "clips_replays_count", "ig_reels_aggregated_all_plays_count",
-                "ig_reels_plays", "ig_reels_reach", "ig_reels_impressions"
+                "profile_visits", "follows", "navigation"
             ]
+            for metric in reel_metrics:
+                if metric in supported and metric not in chosen:
+                    chosen.append(metric)
+        elif media_type == "VIDEO":
+            video_metrics = ["video_views", "profile_visits", "follows", "navigation"]
             for metric in video_metrics:
                 if metric in supported and metric not in chosen:
                     chosen.append(metric)
 
         # Additional engagement metrics
-        additional_metrics = ["engagement", "website_clicks", "email_contacts", "phone_call_clicks"]
+        additional_metrics = ["website_clicks", "email_contacts", "phone_call_clicks"]
         for metric in additional_metrics:
             if metric in supported and metric not in chosen:
                 chosen.append(metric)
 
-        # Remove duplicates while preserving order
-        seen = set()
-        final = [m for m in chosen if not (m in seen or seen.add(m))]
-
-        logger.info(f"🎯 Chosen metrics for media {media_id} ({media_type}/{product_type}): {final}")
-        return final
+        logger.info(f"🎯 Chosen metrics for media {media_id} ({media_type}/{product_type}): {chosen}")
+        return chosen
 
     # Fallback based on media type when metadata unavailable
-    if "REEL" in product_type or media_type == "VIDEO":
-        fallback = ["impressions", "reach", "video_views", "total_interactions", "plays"]
-    elif media_type == "IMAGE":
-        fallback = ["impressions", "reach", "total_interactions", "likes", "comments"]
-    elif media_type == "CAROUSEL_ALBUM":
-        fallback = ["impressions", "reach", "total_interactions", "likes", "comments"]
-    else:
-        fallback = ["impressions", "reach", "total_interactions"]
+    media_key = product_type if product_type == "REEL" else media_type
+    fallback = []
+    
+    for metric, supported_types in FALLBACK_IG_METRICS.items():
+        if media_key in supported_types or media_type in supported_types:
+            fallback.append(metric)
 
-    # Filter fallback against known valid metrics
-    filtered_fallback = [m for m in fallback if m in VALID_IG_METRICS]
+    # Prioritize core metrics
+    priority_order = ["reach", "total_interactions", "comments", "shares", "saved", "profile_visits"]
+    final_fallback = []
+    
+    for metric in priority_order:
+        if metric in fallback:
+            final_fallback.append(metric)
+    
+    for metric in fallback:
+        if metric not in final_fallback:
+            final_fallback.append(metric)
 
-    logger.info(f"📋 No metadata for media {media_id}, using fallback metrics: {filtered_fallback}")
-    return filtered_fallback
+    logger.info(f"📋 No metadata for media {media_id}, using fallback metrics: {final_fallback}")
+    return final_fallback
 
 def fetch_insights_for_media(media: Dict) -> List[Dict]:
     """
@@ -337,7 +344,7 @@ def fetch_insights_for_media(media: Dict) -> List[Dict]:
     media_type = media.get("media_type")
     media_product_type = media.get("media_product_type")
 
-    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    token, _ = get_page_access_token()
     records = []
 
     metrics = choose_metrics_for_media(media)
@@ -354,8 +361,11 @@ def fetch_insights_for_media(media: Dict) -> List[Dict]:
         params = {"metric": metric_str, "access_token": token}
 
         try:
+            logger.info(f"Fetching insights from: {url} with metrics: {metric_str}")
             resp = requests.get(url, params=params, timeout=10)
             body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+            
+            logger.info(f"Insights API response: status={resp.status_code}, body={body}")
 
         except Exception as e:
             logger.warning(f"Exception fetching insights for media {media_id}: {e}")
@@ -429,7 +439,7 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
     Returns:
         DataFrame with comprehensive Instagram insights in long format
     """
-    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    token, _ = get_page_access_token()
 
     if not ig_user_id or not token:
         logger.error("❌ Missing IG_USER_ID or token in fetch_ig_media_insights.")
@@ -451,8 +461,11 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
     try:
         # Handle pagination
         while url:
+            logger.info(f"Fetching media list from: {url}")
             resp = requests.get(url, params=params, timeout=15)
             body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+            
+            logger.info(f"Media list API response: status={resp.status_code}")
 
             if resp.status_code != 200 or "error" in body:
                 logger.error(f"❌ Error fetching IG media list: {body}")
@@ -550,13 +563,11 @@ def compute_instagram_kpis(df: pd.DataFrame, follower_count: Optional[int] = Non
     metrics_summary = df.groupby('metric')['value'].sum().to_dict()
 
     # Core metrics
-    total_impressions = metrics_summary.get('impressions', 0)
     total_reach = metrics_summary.get('reach', 0)
     total_interactions = metrics_summary.get('total_interactions', 0)
-    total_likes = metrics_summary.get('likes', 0)
     total_comments = metrics_summary.get('comments', 0)
     total_shares = metrics_summary.get('shares', 0)
-    total_saves = metrics_summary.get('saves', metrics_summary.get('saved', 0))
+    total_saves = metrics_summary.get('saved', 0)
 
     # Engagement rates
     if follower_count and follower_count > 0:
@@ -564,39 +575,28 @@ def compute_instagram_kpis(df: pd.DataFrame, follower_count: Optional[int] = Non
 
     if total_reach > 0:
         kpis['engagement_rate_by_reach'] = (total_interactions / total_reach) * 100
-
-    if total_impressions > 0:
-        kpis['engagement_rate_by_impressions'] = (total_interactions / total_impressions) * 100
-        kpis['save_rate'] = (total_saves / total_impressions) * 100
-        kpis['comment_rate'] = (total_comments / total_impressions) * 100
-        kpis['share_rate'] = (total_shares / total_impressions) * 100
+        kpis['save_rate'] = (total_saves / total_reach) * 100
+        kpis['comment_rate'] = (total_comments / total_reach) * 100
+        kpis['share_rate'] = (total_shares / total_reach) * 100
 
     # Video metrics
     total_video_views = metrics_summary.get('video_views', 0)
-    total_plays = metrics_summary.get('plays', 0)
-
-    if total_reach > 0 and total_video_views > 0:
-        kpis['video_view_rate'] = (total_video_views / total_reach) * 100
-
-    # Reels-specific KPIs
-    total_reels_plays = metrics_summary.get('ig_reels_plays', 0)
     total_reels_watch_time = metrics_summary.get('ig_reels_video_view_total_time', 0)
     avg_reels_watch_time = metrics_summary.get('ig_reels_avg_watch_time', 0)
 
-    if total_reels_plays > 0:
-        kpis['reels_completion_rate'] = (total_reels_watch_time / total_reels_plays) if total_reels_plays else 0
+    if total_video_views > 0 and total_reach > 0:
+        kpis['video_view_rate'] = (total_video_views / total_reach) * 100
 
     # Growth metrics
     total_follows = metrics_summary.get('follows', 0)
     total_profile_visits = metrics_summary.get('profile_visits', 0)
 
-    if total_impressions > 0:
-        kpis['profile_visit_rate'] = (total_profile_visits / total_impressions) * 100
-        kpis['follow_rate'] = (total_follows / total_impressions) * 100
+    if total_reach > 0:
+        kpis['profile_visit_rate'] = (total_profile_visits / total_reach) * 100
+        kpis['follow_rate'] = (total_follows / total_reach) * 100
 
     # Summary totals
     kpis.update({
-        'total_impressions': total_impressions,
         'total_reach': total_reach,
         'total_interactions': total_interactions,
         'total_video_views': total_video_views,
@@ -604,7 +604,8 @@ def compute_instagram_kpis(df: pd.DataFrame, follower_count: Optional[int] = Non
         'total_follows': total_follows,
         'total_saves': total_saves,
         'media_count': len(df['media_id'].unique()),
-        'follower_count': follower_count
+        'follower_count': follower_count,
+        'avg_reels_watch_time': avg_reels_watch_time
     })
 
     return kpis
