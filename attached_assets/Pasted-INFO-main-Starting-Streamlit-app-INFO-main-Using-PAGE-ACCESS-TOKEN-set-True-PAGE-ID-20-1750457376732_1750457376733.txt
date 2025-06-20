@@ -1,0 +1,71 @@
+INFO:__main__:🚀 Starting Streamlit app
+INFO:__main__:Using PAGE_ACCESS_TOKEN set: True, PAGE_ID: 2093978137560528
+INFO:__main__:IG_USER_ID set: True
+INFO:__main__:✅ facebook_business.api location: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/api.py
+INFO:data_store:Database tables initialized successfully
+INFO:data_store:DataStore initialized with database: campaign_optimizer.db
+INFO:fb_client:✅ facebook_business.api loaded from: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/api.py
+INFO:fb_client:✅ facebook_business.adobjects.adaccount loaded from: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/adobjects/adaccount.py
+INFO:fb_client:🔍 Environment check - AD_ACCOUNT_ID: 860378271946500, ACCESS_TOKEN set: True
+INFO:fb_client:🔍 APP_ID set: True, APP_SECRET set: True
+INFO:fb_client:✅ FacebookAdsApi initialized with app secret proof
+INFO:fb_client:✅ Facebook SDK initialized for Ad Account: act_860378271946500
+INFO:auto_actions:Automation safety validation: {'feature_flag_enabled': False, 'facebook_client_initialized': True, 'audit_logging_available': True, 'dry_run_default': True, 'safe_to_automate': True}
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Organic insights validation: {'page_token_available': True, 'page_id_available': True, 'ig_user_id_available': True, 'token_source': 'PAGE_ACCESS_TOKEN', 'page_insights_enabled': True, 'instagram_insights_enabled': True}
+INFO:__main__:🚀 Starting Streamlit app
+INFO:__main__:Using PAGE_ACCESS_TOKEN set: True, PAGE_ID: 2093978137560528
+INFO:__main__:IG_USER_ID set: True
+INFO:__main__:✅ facebook_business.api location: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/api.py
+INFO:auto_actions:Automation safety validation: {'feature_flag_enabled': False, 'facebook_client_initialized': True, 'audit_logging_available': True, 'dry_run_default': True, 'safe_to_automate': True}
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Organic insights validation: {'page_token_available': True, 'page_id_available': True, 'ig_user_id_available': True, 'token_source': 'PAGE_ACCESS_TOKEN', 'page_insights_enabled': True, 'instagram_insights_enabled': True}
+INFO:__main__:🚀 Starting Streamlit app
+INFO:__main__:Using PAGE_ACCESS_TOKEN set: True, PAGE_ID: 2093978137560528
+INFO:__main__:IG_USER_ID set: True
+INFO:__main__:✅ facebook_business.api location: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/api.py
+INFO:auto_actions:Automation safety validation: {'feature_flag_enabled': False, 'facebook_client_initialized': True, 'audit_logging_available': True, 'dry_run_default': True, 'safe_to_automate': True}
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Organic insights validation: {'page_token_available': True, 'page_id_available': True, 'ig_user_id_available': True, 'token_source': 'PAGE_ACCESS_TOKEN', 'page_insights_enabled': True, 'instagram_insights_enabled': True}
+INFO:__main__:Fetching organic data with preset: last_30d
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Organic insights validation: {'page_token_available': True, 'page_id_available': True, 'ig_user_id_available': True, 'token_source': 'PAGE_ACCESS_TOKEN', 'page_insights_enabled': True, 'instagram_insights_enabled': True}
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Fetching Page insights from: https://graph.facebook.com/v23.0/2093978137560528/insights with params: {'access_token': 'EAAJRYTAWhf8BO4CG2o9jTYddJGMGubgHQeHRv46N0l0FBvsQlyDpkeL6VowbuIWRyV2hfqk8NeJAKK8gZBbZCD3ZAGeXAgDJjCHMlggOMXU6bde3ZAoEKDrDDkXUQDIvU6QBPMEvID0CwZA7MV5rdW3lQcWVClpnTnNjWSd5derpCuDuLDes44CMkZCY2Ts4eXfdeOFOGnguIQ', 'metric': 'page_impressions_organic,page_engaged_users,page_reach,page_post_engagements', 'since': '2025-05-21', 'until': '2025-06-19', 'period': 'day'}
+ERROR:fetch_organic:Page insights fetch error: status 400, response JSON: {'error': {'message': '(#100) The value must be a valid insights metric', 'type': 'OAuthException', 'code': 100, 'fbtrace_id': 'AI9uDeqT53JQhwvf2G_hThM'}}
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Fetching Instagram media from: https://graph.facebook.com/v23.0/17841413272102235/media
+INFO:fetch_organic:Found 25 Instagram media items
+INFO:fetch_organic:After date filtering: 3 media items
+ERROR:fetch_organic:Instagram insights fetch error for media 17874435957359558: status 400, response JSON: {'error': {'message': '(#100) metric[2] must be one of the following values: impressions, reach, replies, saved, video_views, likes, comments, shares, plays, total_interactions, follows, profile_visits, profile_activity, navigation, ig_reels_video_view_total_time, ig_reels_avg_watch_time, clips_replays_count, ig_reels_aggregated_all_plays_count, views', 'type': 'OAuthException', 'code': 100, 'fbtrace_id': 'A-l_IHK-dhTYV4JwBVK3NrV'}}
+ERROR:fetch_organic:Instagram insights fetch error for media 18227379361292101: status 400, response JSON: {'error': {'message': '(#100) metric[2] must be one of the following values: impressions, reach, replies, saved, video_views, likes, comments, shares, plays, total_interactions, follows, profile_visits, profile_activity, navigation, ig_reels_video_view_total_time, ig_reels_avg_watch_time, clips_replays_count, ig_reels_aggregated_all_plays_count, views', 'type': 'OAuthException', 'code': 100, 'fbtrace_id': 'AJ1M9_YWQ5X7k8d0G10pR_U'}}
+ERROR:fetch_organic:Instagram insights fetch error for media 17883264042295160: status 400, response JSON: {'error': {'message': '(#100) metric[2] must be one of the following values: impressions, reach, replies, saved, video_views, likes, comments, shares, plays, total_interactions, follows, profile_visits, profile_activity, navigation, ig_reels_video_view_total_time, ig_reels_avg_watch_time, clips_replays_count, ig_reels_aggregated_all_plays_count, views', 'type': 'OAuthException', 'code': 100, 'fbtrace_id': 'Arwz5O8qCCiQlbXYRK4ZEGV'}}
+WARNING:fetch_organic:No Instagram insights data returned
+WARNING:fetch_organic:No organic insights data available
+INFO:__main__:🚀 Starting Streamlit app
+INFO:__main__:Using PAGE_ACCESS_TOKEN set: True, PAGE_ID: 2093978137560528
+INFO:__main__:IG_USER_ID set: True
+INFO:__main__:✅ facebook_business.api location: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/api.py
+INFO:auto_actions:Automation safety validation: {'feature_flag_enabled': False, 'facebook_client_initialized': True, 'audit_logging_available': True, 'dry_run_default': True, 'safe_to_automate': True}
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Organic insights validation: {'page_token_available': True, 'page_id_available': True, 'ig_user_id_available': True, 'token_source': 'PAGE_ACCESS_TOKEN', 'page_insights_enabled': True, 'instagram_insights_enabled': True}
+INFO:fetch_organic:Fetching latest Instagram insights for date: 2025-06-19
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Fetching Instagram media from: https://graph.facebook.com/v23.0/17841413272102235/media
+INFO:fetch_organic:Found 25 Instagram media items
+INFO:fetch_organic:After date filtering: 0 media items
+WARNING:fetch_organic:No Instagram insights data returned
+INFO:__main__:🚀 Starting Streamlit app
+INFO:__main__:Using PAGE_ACCESS_TOKEN set: True, PAGE_ID: 2093978137560528
+INFO:__main__:IG_USER_ID set: True
+INFO:__main__:✅ facebook_business.api location: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/api.py
+INFO:auto_actions:Automation safety validation: {'feature_flag_enabled': False, 'facebook_client_initialized': True, 'audit_logging_available': True, 'dry_run_default': True, 'safe_to_automate': True}
+INFO:fetch_paid:📊 Fetching campaign performance for last_7d
+INFO:fetch_paid:🔍 Fetching campaign insights with params: {'level': 'campaign', 'date_preset': 'last_7d'}
+INFO:fetch_paid:✅ Successfully fetched 1 campaign insight records
+INFO:fetch_paid:📊 Fetching campaign performance for last_7d
+INFO:fetch_paid:🔍 Fetching campaign insights with params: {'level': 'campaign', 'date_preset': 'last_7d'}
+INFO:fetch_paid:✅ Successfully fetched 1 campaign insight records
+INFO:fetch_paid:📈 Generated performance summary: {'total_campaigns': 1, 'total_spend': 527.31, 'total_impressions': 33465, 'total_clicks': 590, 'average_ctr': 1.76, 'average_cpc': 0.89, 'date_range': 'last_7d'}
+INFO:fetch_organic:Using PAGE_ACCESS_TOKEN for organic insights
+INFO:fetch_organic:Organic insights validation: {'page_token_available': True, 'page_id_available': True, 'ig_user_id_available': True, 'token_source': 'PAGE_ACCESS_TOKEN', 'page_insights_enabled': True, 'instagram_insights_enabled': True}

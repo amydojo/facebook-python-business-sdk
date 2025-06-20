@@ -462,4 +462,3 @@ ORGANIC_DATE_PRESETS = {
     "this_month": "This Month",
     "last_month": "Last Month"
 }
-`
