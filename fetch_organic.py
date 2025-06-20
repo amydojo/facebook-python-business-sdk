@@ -10,7 +10,7 @@ import requests
 from datetime import datetime, timedelta
 from config import config
 from facebook_business.api import FacebookAdsApi
-from facebook_business.adobjects import Page
+from facebook_business.adobjects.page import Page
 
 logger = logging.getLogger(__name__)
 

@@ -10,12 +10,14 @@ try:
     from facebook_business.api import FacebookAdsApi
     from facebook_business.adobjects.adaccount import AdAccount
     from facebook_business.exceptions import FacebookError
+    from facebook_business.adobjects.page import Page
 except ImportError as e:
     logging.error(f"Facebook Business SDK import error: {e}")
     # Fallback or alternative handling
     FacebookAdsApi = None
     AdAccount = None
     FacebookError = None
+    Page = None
 
 logger = logging.getLogger(__name__)
 

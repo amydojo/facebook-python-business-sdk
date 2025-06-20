@@ -10,6 +10,36 @@ from facebook_business.exceptions import (
 from facebook_business.adobjects.abstractobject import AbstractObject
 
 
+class ObjectParser(object):
+    """
+    Parser for converting API responses to object instances
+    """
+    
+    def __init__(self, target_class=None, api=None, reuse_object=None):
+        self.target_class = target_class
+        self.api = api
+        self.reuse_object = reuse_object
+    
+    def parse_single(self, response):
+        """Parse a single object from API response"""
+        if self.reuse_object:
+            self.reuse_object._data = response
+            return self.reuse_object
+        elif self.target_class:
+            obj = self.target_class(api=self.api)
+            obj._data = response
+            return obj
+        else:
+            return response
+    
+    def parse_multiple(self, response):
+        """Parse multiple objects from API response"""
+        if isinstance(response, list):
+            return [self.parse_single(item) for item in response]
+        else:
+            return self.parse_single(response)
+
+
 class ObjectParser:
     """
     Parser for API response

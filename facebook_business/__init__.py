@@ -4,7 +4,8 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from facebook_business.session import FacebookSession
-
 __version__ = '23.0.0'
-__all__ = ['session', 'api']
+
+from facebook_business.api import FacebookAdsApi
+from facebook_business.session import FacebookSession
+from facebook_business.exceptions import FacebookError

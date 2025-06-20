@@ -18,6 +18,145 @@ from facebook_business.adobjects.objectparser import ObjectParser
 
 import logging
 
+
+class AbstractCrudObject(AbstractObject):
+    """
+    Abstract class for CRUD objects that can be created, read, updated, and deleted.
+    """
+
+    def __init__(self, fbid=None, parent_id=None, api=None):
+        super(AbstractCrudObject, self).__init__()
+
+        # Late import to avoid circular dependency
+        from facebook_business.api import FacebookAdsApi
+
+        self._api = api or FacebookAdsApi.get_default_api()
+        self._parent_id = parent_id
+
+        if fbid:
+            self[self.Field.id] = fbid
+            self._changes = {}
+        else:
+            self._changes = dict(self._data)
+
+    def get_id(self):
+        return self.get(self.Field.id)
+
+    def api_get(self, fields=None, params=None, batch=None, success=None, failure=None, pending=False):
+        """Get this object from the API"""
+        from facebook_business.api import FacebookRequest
+        from facebook_business.adobjects.objectparser import ObjectParser
+        from facebook_business.typechecker import TypeChecker
+
+        if not fields:
+            fields = []
+        if not params:
+            params = {}
+
+        request = FacebookRequest(
+            node_id=self.get_id(),
+            method='GET',
+            endpoint='/',
+            api=self._api,
+            target_class=self.__class__,
+            api_type='NODE',
+            response_parser=ObjectParser(reuse_object=self),
+        )
+
+        request.add_params(params)
+        request.add_fields(fields)
+
+        if batch is not None:
+            request.add_to_batch(batch, success=success, failure=failure)
+            return request
+        elif pending:
+            return request
+        else:
+            self.assure_call()
+            return request.execute()
+
+    def api_update(self, fields=None, params=None, batch=None, success=None, failure=None, pending=False):
+        """Update this object via the API"""
+        from facebook_business.api import FacebookRequest
+        from facebook_business.adobjects.objectparser import ObjectParser
+
+        if not params:
+            params = {}
+
+        request = FacebookRequest(
+            node_id=self.get_id(),
+            method='POST',
+            endpoint='/',
+            api=self._api,
+            target_class=self.__class__,
+            api_type='NODE',
+            response_parser=ObjectParser(reuse_object=self),
+        )
+
+        request.add_params(params)
+        if fields:
+            request.add_fields(fields)
+
+        if batch is not None:
+            request.add_to_batch(batch, success=success, failure=failure)
+            return request
+        elif pending:
+            return request
+        else:
+            self.assure_call()
+            return request.execute()
+
+    def api_delete(self, fields=None, params=None, batch=None, success=None, failure=None, pending=False):
+        """Delete this object via the API"""
+        from facebook_business.api import FacebookRequest
+        from facebook_business.adobjects.objectparser import ObjectParser
+
+        if not params:
+            params = {}
+
+        request = FacebookRequest(
+            node_id=self.get_id(),
+            method='DELETE',
+            endpoint='/',
+            api=self._api,
+            target_class=self.__class__,
+            api_type='NODE',
+            response_parser=ObjectParser(reuse_object=self),
+        )
+
+        request.add_params(params)
+        if fields:
+            request.add_fields(fields)
+
+        if batch is not None:
+            request.add_to_batch(batch, success=success, failure=failure)
+            return request
+        elif pending:
+            return request
+        else:
+            self.assure_call()
+            return request.execute()
+
+    def assure_call(self):
+        """Ensure API is properly configured"""
+        if not self._api:
+            from facebook_business.api import FacebookAdsApi
+            self._api = FacebookAdsApi.get_default_api()
+
+        if not self._api.is_valid():
+            raise FacebookBadObjectError("API not properly initialized")
+
+    def save(self):
+        """Save changes to this object"""
+        if self.get_id():
+            return self.api_update()
+        else:
+            raise FacebookBadObjectError("Cannot save object without ID")
+
+    def delete(self):
+        """Delete this object"""
+        return self.api_delete()
+
 class AbstractCrudObject(AbstractObject):
     """
     Extends AbstractObject and implements methods to create, read, update,
