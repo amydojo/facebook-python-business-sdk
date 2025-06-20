@@ -3,6 +3,7 @@ run = "npm run"
 
 [nix]
 channel = "stable-24_05"
+packages = ["glibcLocales", "libxcrypt", "pkg-config", "xsimd"]
 
 [deployment]
 run = ["sh", "-c", "npm run"]
