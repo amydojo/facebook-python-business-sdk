@@ -60,6 +60,14 @@ def check_environment():
 def main():
     logger.info("🚀 Starting Streamlit app")
     
+    # Log organic insights environment status
+    page_token_set = bool(os.getenv('PAGE_ACCESS_TOKEN'))
+    page_id = os.getenv('PAGE_ID')
+    ig_user_id = os.getenv('IG_USER_ID')
+    
+    logger.info(f"Using PAGE_ACCESS_TOKEN set: {page_token_set}, PAGE_ID: {page_id}")
+    logger.info(f"IG_USER_ID set: {bool(ig_user_id)}")
+    
     # Environment and SDK checks
     env_check = check_environment()
     
@@ -119,7 +127,9 @@ def main():
             "AD_ACCOUNT_ID": bool(os.getenv("AD_ACCOUNT_ID")),
             "META_APP_ID": bool(os.getenv("META_APP_ID")),
             "META_APP_SECRET": bool(os.getenv("META_APP_SECRET")),
-            "PAGE_ID": bool(os.getenv("PAGE_ID"))
+            "PAGE_ACCESS_TOKEN": bool(os.getenv("PAGE_ACCESS_TOKEN")),
+            "PAGE_ID": bool(os.getenv("PAGE_ID")),
+            "IG_USER_ID": bool(os.getenv("IG_USER_ID"))
         }
         
         for var, is_set in env_vars.items():
@@ -208,24 +218,129 @@ def main():
         with col2:
             st.subheader("Organic Content")
             
-            if st.button("Fetch Latest Organic Data"):
-                with st.spinner("Fetching organic insights..."):
-                    try:
-                        organic_data = get_organic_insights(date_preset="last_7d")
-                        if not organic_data.empty:
-                            st.success(f"✅ Fetched organic insights")
-                            st.dataframe(organic_data)
-                            
-                            # Simple chart for organic reach
-                            if 'page_reach' in organic_data.columns:
-                                fig = px.line(organic_data, x='date', y='page_reach', 
-                                            title='Page Reach Over Time')
-                                st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("No organic data available")
-                    except Exception as e:
-                        st.error(f"Error fetching organic data: {e}")
-                        logger.error(f"❌ Error fetching organic data: {e}", exc_info=True)
+            # Check organic insights environment
+            try:
+                from fetch_organic import validate_organic_environment, ORGANIC_DATE_PRESETS
+                organic_validation = validate_organic_environment()
+                
+                # Show environment status
+                if not organic_validation['page_insights_enabled']:
+                    st.warning("⚠️ PAGE_ACCESS_TOKEN or PAGE_ID missing—Facebook Page insights disabled")
+                
+                if organic_validation['ig_user_id_available'] and not organic_validation['page_insights_enabled']:
+                    st.warning("⚠️ IG_USER_ID set but PAGE_ACCESS_TOKEN missing—Instagram insights disabled")
+                elif not organic_validation['ig_user_id_available']:
+                    st.info("ℹ️ IG_USER_ID not set: Instagram insights disabled")
+                
+                # Date preset selector for organic data
+                organic_date_preset = st.selectbox(
+                    "Select organic time range:",
+                    list(ORGANIC_DATE_PRESETS.keys()),
+                    format_func=lambda x: ORGANIC_DATE_PRESETS[x],
+                    index=0,  # Default to "latest"
+                    key="organic_preset"
+                )
+                
+                col_fetch, col_instagram = st.columns([1, 1])
+                
+                with col_fetch:
+                    if st.button("Fetch Organic Data"):
+                        with st.spinner("Fetching organic insights..."):
+                            try:
+                                logger.info(f"Fetching organic data with preset: {organic_date_preset}")
+                                organic_data = get_organic_insights(
+                                    date_preset=organic_date_preset,
+                                    include_instagram=True
+                                )
+                                
+                                if not organic_data.empty:
+                                    st.success(f"✅ Fetched {len(organic_data)} organic insights records")
+                                    
+                                    # Display summary metrics for latest data
+                                    if organic_date_preset in ['latest', 'yesterday']:
+                                        summary = get_organic_performance_summary(organic_date_preset)
+                                        if summary:
+                                            col_a, col_b, col_c, col_d = st.columns(4)
+                                            with col_a:
+                                                st.metric("Total Reach", f"{summary['total_reach']:,}")
+                                            with col_b:
+                                                st.metric("Total Impressions", f"{summary['total_impressions']:,}")
+                                            with col_c:
+                                                st.metric("Total Engagement", f"{summary['total_engagement']:,}")
+                                            with col_d:
+                                                st.metric("Engagement Rate", f"{summary['avg_engagement_rate']:.2f}%")
+                                    
+                                    # Separate Page and Instagram data
+                                    if 'source' in organic_data.columns:
+                                        page_data = organic_data[organic_data['source'] == 'facebook_page']
+                                        ig_data = organic_data[organic_data['source'] == 'instagram']
+                                        
+                                        if not page_data.empty:
+                                            st.subheader("📘 Facebook Page Insights")
+                                            st.dataframe(page_data)
+                                            
+                                            # Chart for page metrics
+                                            page_reach_data = page_data[page_data['metric'] == 'page_reach']
+                                            if not page_reach_data.empty:
+                                                fig = px.line(page_reach_data, x='date', y='value', 
+                                                            title='Facebook Page Reach Over Time')
+                                                st.plotly_chart(fig, use_container_width=True)
+                                        
+                                        if not ig_data.empty:
+                                            st.subheader("📸 Instagram Insights")
+                                            st.dataframe(ig_data)
+                                            
+                                            # Chart for Instagram metrics
+                                            ig_impressions = ig_data[ig_data['metric'] == 'impressions']
+                                            if not ig_impressions.empty:
+                                                fig = px.bar(ig_impressions, x='date', y='value',
+                                                           title='Instagram Impressions by Media')
+                                                st.plotly_chart(fig, use_container_width=True)
+                                    else:
+                                        st.dataframe(organic_data)
+                                        
+                                        # Simple chart for organic reach
+                                        if 'page_reach' in organic_data.columns:
+                                            fig = px.line(organic_data, x='date', y='page_reach', 
+                                                        title='Page Reach Over Time')
+                                            st.plotly_chart(fig, use_container_width=True)
+                                else:
+                                    if organic_date_preset in ['latest', 'yesterday']:
+                                        st.warning("⚠️ No data for latest organic insights. Check permissions, token validity, or whether there was activity yesterday.")
+                                    else:
+                                        st.info("No organic data available for the selected time range")
+                                        
+                            except Exception as e:
+                                st.error(f"Error fetching organic data: {e}")
+                                logger.error(f"❌ Error fetching organic data: {e}", exc_info=True)
+                
+                with col_instagram:
+                    # Instagram-specific latest insights
+                    if organic_validation['instagram_insights_enabled'] and st.button("Latest Instagram Only"):
+                        with st.spinner("Fetching latest Instagram insights..."):
+                            try:
+                                from fetch_organic import fetch_latest_ig_media_insights
+                                ig_user_id = os.getenv('IG_USER_ID')
+                                
+                                ig_data = fetch_latest_ig_media_insights(
+                                    ig_user_id, 
+                                    metrics=['impressions', 'reach', 'engagement']
+                                )
+                                
+                                if not ig_data.empty:
+                                    st.success(f"✅ Fetched {len(ig_data)} Instagram insights")
+                                    st.subheader("📸 Latest Instagram Media Insights")
+                                    st.dataframe(ig_data)
+                                else:
+                                    st.warning("⚠️ No Instagram media insights for yesterday. Check if any posts were made.")
+                                    
+                            except Exception as e:
+                                st.error(f"Error fetching Instagram data: {e}")
+                                logger.error(f"❌ Error fetching Instagram data: {e}", exc_info=True)
+                
+            except ImportError as e:
+                st.error(f"❌ Failed to import organic insights modules: {e}")
+                logger.error(f"❌ Organic insights module import error: {e}", exc_info=True)
     
     with tab2:
         st.header("Anomaly Detection")

@@ -29,10 +29,14 @@ Set the following environment variables in Replit Secrets (🔒 icon in sidebar)
 - `META_ACCESS_TOKEN`: Your Facebook Marketing API access token
 - `AD_ACCOUNT_ID`: Your Facebook Ad Account ID (numbers only, without "act_" prefix)
 
+**For Organic Insights:**
+- `PAGE_ACCESS_TOKEN`: Facebook Page access token (preferred for Page insights)
+- `PAGE_ID`: Your Facebook Page ID (required for organic insights)
+- `IG_USER_ID`: Your Instagram Business User ID (optional, for Instagram insights)
+
 **Optional but recommended:**
 - `META_APP_ID`: Your Facebook App ID (enables app secret proof for security)
-- `META_APP_SECRET`: Your Facebook App Secret  
-- `PAGE_ID`: Your Facebook Page ID (for organic insights)
+- `META_APP_SECRET`: Your Facebook App Secret
 
 **How to get these values:**
 - **Access Token**: [Facebook Business Settings](https://business.facebook.com/settings/system-users) → System Users → Generate Token
@@ -59,6 +63,20 @@ This will check:
 - ✅ Environment variables  
 - ✅ API initialization
 - ✅ No local module shadowing
+
+### 4. Test Organic Insights (Optional)
+
+If you plan to use organic insights, test the configuration:
+
+```bash
+python test_organic_insights.py
+```
+
+This will verify:
+- ✅ PAGE_ACCESS_TOKEN and PAGE_ID configuration
+- ✅ Instagram User ID setup (if applicable)
+- ✅ Latest organic data fetching
+- ✅ Combined Page and Instagram insights
 
 ### 4. Run the Application
 
