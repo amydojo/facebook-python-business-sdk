@@ -1,0 +1,121 @@
+You are a senior Python engineer and Facebook Graph API expert. Based on the logs, our `fetch_page_insights_metadata()` is incorrectly calling `/{PAGE_ID}/insights` instead of `/{PAGE_ID}/insights/metadata`, causing a 400 error “The value must be a valid insights metric”. Also, `fetch_latest_ig_media_insights` is missing, causing an ImportError. Please patch the module `fetch_organic.py` and relevant parts of `dashboard.py` to fix these issues and make the organic insights fetching robust.
+
+**Instructions:**
+
+1. **Correct the metadata endpoint**  
+   - In `fetch_page_insights_metadata()`, change the request URL from `https://graph.facebook.com/{GRAPH_API_VERSION}/{PAGE_ID}/insights` to `https://graph.facebook.com/{GRAPH_API_VERSION}/{PAGE_ID}/insights/metadata`.
+   - Only pass `access_token` as a param; do not include any invalid parameters.  
+   - Log at INFO: `Fetching Page insights metadata from: {url}` before the request.  
+   - After response, parse JSON safely; if `status_code != 200` or `"error"` in JSON, log:
+     ```
+     logger.error(f"Page insights metadata error: status {resp.status_code}, response JSON: {body}")
+     ```
+     and return an empty list. If successful, extract `name` from each item in `data` and return the list of metric names. Log:
+     ```
+     logger.info(f"Fetched {len(metric_names)} Page metrics metadata: {metric_names[:10]} ...")
+     ```
+
+2. **Cache metadata**  
+   - Add a module-level variable `_cached_page_metrics = None`.  
+   - Provide a helper `get_cached_page_metrics()` that checks `_cached_page_metrics` and, if None, calls the corrected `fetch_page_insights_metadata()`, stores the result in `_cached_page_metrics`, then returns it.  
+   - Log when caching occurs: `logger.info("Caching Page metrics metadata")`.
+
+3. **Select default Page metrics**  
+   - Add `select_default_page_metrics(available_metrics)` that iterates over a candidate list like `["page_impressions_organic","page_impressions_paid","page_engaged_users","page_reach","page_post_engagements"]` and includes only those present in `available_metrics`.  
+   - Log which candidates were selected vs skipped: e.g.  
+     ```
+     logger.info(f"Default Page metrics: {selected_metrics}")
+     logger.debug(f"Skipped Page metrics (not available): {skipped_metrics}")
+     ```
+
+4. **Update `fetch_page_insights`**  
+   - Before requesting `/{PAGE_ID}/insights`, call `get_cached_page_metrics()` to get available metrics. Filter the incoming `metrics` argument against this list, producing `valid_metrics`.  
+   - If `valid_metrics` is empty, log:
+     ```
+     logger.error(f"No valid Page metrics to request: {metrics}, available: {available_metrics}")
+     ```
+     and return an empty DataFrame.  
+   - Otherwise, build `metric_str = ",".join(valid_metrics)`, and call:
+     ```
+     url = f"{GRAPH_API_BASE}/{page_id}/insights"
+     params = {"metric": metric_str, "period": period, "since": since, "until": until, "access_token": token}
+     ```
+   - Log at INFO: `Fetching Page insights for {since} to {until} with metrics: {valid_metrics}`.  
+   - After response, parse JSON safely; if error, log full JSON as above and return empty DataFrame.
+
+5. **Define `fetch_latest_page_insights`**  
+   - Add a function `fetch_latest_page_insights(metrics, period="day")` which computes yesterday’s date via `datetime.date.today() - timedelta(days=1)` (using server timezone), formats as `"YYYY-MM-DD"`, then calls `fetch_page_insights(metrics, since=yesterday, until=yesterday, period=period)`. Log: `logger.info(f"Fetching latest Page insights for date: {yesterday}")`.
+
+6. **Instagram: define and export `fetch_latest_ig_media_insights`**  
+   - In the same module, add `def fetch_latest_ig_media_insights(ig_user_id, metrics=None):` which computes yesterday’s date string and calls `fetch_ig_media_insights(ig_user_id, since=yesterday, until=yesterday, metrics=metrics)`. Log: `logger.info(f"Fetching latest Instagram insights for date: {yesterday}")`.  
+   - Ensure this function is present in `fetch_organic.py` so `dashboard.py` can `import fetch_latest_ig_media_insights`.  
+   - Confirm `fetch_ig_media_insights` filters metrics against a constant `VALID_IG_METRICS` set (e.g., `{"impressions","reach","total_interactions",...}`), logs valid metrics, fetches media list, filters by timestamp, requests only valid metrics, logs errors fully, and returns a DataFrame or empty if none.
+
+7. **API version & base URL**  
+   - At top of `fetch_organic.py`, set:
+     ```python
+     GRAPH_API_VERSION = "v23.0"
+     GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+     ```
+   - Use these constants in both metadata and insights calls.
+
+8. **Date preset logic**  
+   - Ensure `get_organic_insights(date_preset=None, since=None, until=None, metrics=None)` correctly handles `"yesterday"`, `"last_7d"`, `"last_30d"`, `"this_month"`, `"last_month"`, etc., computing since/until, logging the chosen range:  
+     ```
+     logger.info(f"Using date preset '{date_preset}': {since} to {until}")
+     ```
+   - If unknown preset or invalid range, log error and return empty DataFrame.
+
+9. **Dashboard import fix**  
+   - In `dashboard.py`, change any import from `fetch_organic` to include the new `fetch_latest_ig_media_insights`:
+     ```python
+     from fetch_organic import fetch_latest_ig_media_insights, fetch_ig_media_insights, get_organic_insights, ...
+     ```
+   - Ensure the module exports these functions.
+
+10. **Testing snippet**  
+    - At bottom of `fetch_organic.py`:
+      ```python
+      if __name__ == "__main__":
+          # Test metadata fetch
+          available = get_cached_page_metrics()
+          print("Available Page metrics metadata:", available)
+          defaults = select_default_page_metrics(available)
+          print("Default Page metrics:", defaults)
+          # Test latest Page insights
+          if defaults:
+              df_latest = fetch_latest_page_insights(defaults)
+              print("Latest Page insights:", df_latest)
+          # Test Instagram latest
+          ig_id = os.getenv("IG_USER_ID")
+          if ig_id:
+              df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions","reach"])
+              print("Latest IG insights:", df_ig)
+      ```
+    - This verifies the fixes interactively.
+
+11. **Comments & docs references**  
+    - Above `fetch_page_insights_metadata()`, add:
+      ```
+      # Official docs: https://developers.facebook.com/docs/graph-api/reference/page/insights/metadata/
+      # Use this endpoint to list valid Page Insights metrics under the given API version.
+      ```
+    - Above `fetch_latest_ig_media_insights`, add:
+      ```
+      # Official docs: https://developers.facebook.com/docs/instagram-api/guides/insights/
+      # Fetch yesterday’s Instagram media insights by filtering media timestamps.
+      ```
+    - Above date logic: `# Compute yesterday via datetime.date.today() - timedelta(days=1)`.
+
+Using the above, rewrite or patch `fetch_organic.py` so that:
+- `fetch_page_insights_metadata()` correctly calls `/insights/metadata`, caches results, logs properly.
+- `fetch_page_insights` filters metrics against cached metadata.
+- `fetch_latest_page_insights` is defined.
+- `fetch_latest_ig_media_insights` is defined.
+- API version constants used.
+- Date presets handled and logged.
+- Full error JSON logging in all HTTP calls.
+- Export functions so `dashboard.py` import works.
+- Include the testing snippet at module bottom.
+
+Also update `dashboard.py` imports to include `fetch_latest_ig_media_insights`. Return the full updated `fetch_organic.py` and the relevant import lines or date-preset integration in `dashboard.py`. Keep comments conversational but precise.  
