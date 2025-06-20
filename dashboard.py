@@ -405,6 +405,13 @@ def show_instagram_insights():
     with st.expander("🤖 AI Commentary & Recommendations"):
         if openai_api_key:
             # Prepare context for AI
+            # Calculate engagement rate
+            if follower_count and follower_count > 0:
+                engagement_rate = ((metrics_map.get('total_interactions', 0) / follower_count) * 100)
+                engagement_rate_str = f"{engagement_rate:.2f}%"
+            else:
+                engagement_rate_str = "N/A"
+
             context = f"""
             Post Date: {pd.to_datetime(post_info['timestamp']).strftime('%Y-%m-%d')}
             Media Type: {post_info['media_type']} / {post_info['media_product_type']}
@@ -419,7 +426,7 @@ def show_instagram_insights():
             - Profile Visits: {metrics_map.get('profile_visits', 0):,}
             - Follower Count: {follower_count:,}
 
-            Engagement Rate: {((metrics_map.get('total_interactions', 0) / follower_count) * 100):.2f}% if follower_count else 'N/A'}
+            Engagement Rate: {engagement_rate_str}
             """
 
             ai_commentary = cached_openai_commentary(selected_media_id, context)
