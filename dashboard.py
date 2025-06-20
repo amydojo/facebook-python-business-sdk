@@ -177,34 +177,117 @@ def main():
                 index=1
             )
 
+            # Option to include creative previews
+            include_creatives = st.checkbox("Include Creative Previews", value=True)
+
             if st.button("Fetch Latest Paid Data"):
                 with st.spinner("Fetching campaign data..."):
                     try:
-                        paid_data = get_campaign_performance(date_preset=date_preset)
+                        from fetch_paid import get_campaign_performance_with_creatives
+                        paid_data = get_campaign_performance_with_creatives(
+                            date_preset=date_preset, 
+                            include_creatives=include_creatives
+                        )
+                        
                         if not paid_data.empty:
                             st.success(f"✅ Fetched {len(paid_data)} campaign records")
 
                             # Display summary metrics
-                            summary = get_campaign_performance_summary(date_preset=date_preset)
-                            if summary:
-                                col_a, col_b, col_c, col_d = st.columns(4)
-                                with col_a:
-                                    st.metric("Total Spend", f"${summary['total_spend']:.2f}")
-                                with col_b:
-                                    st.metric("Total Impressions", f"{summary['total_impressions']:,}")
-                                with col_c:
-                                    st.metric("Total Clicks", f"{summary['total_clicks']:,}")
-                                with col_d:
-                                    st.metric("Avg CTR", f"{summary['average_ctr']:.2f}%")
+                            total_spend = paid_data['spend'].sum() if 'spend' in paid_data.columns else 0
+                            total_impr = paid_data['impressions'].sum() if 'impressions' in paid_data.columns else 0
+                            total_clicks = paid_data['clicks'].sum() if 'clicks' in paid_data.columns else 0
+                            avg_ctr = (total_clicks / total_impr * 100) if total_impr > 0 else 0
 
-                            # Display data table
-                            st.dataframe(paid_data)
+                            col_a, col_b, col_c, col_d = st.columns(4)
+                            with col_a:
+                                st.metric("Total Spend", f"${total_spend:.2f}")
+                            with col_b:
+                                st.metric("Total Impressions", f"{int(total_impr):,}")
+                            with col_c:
+                                st.metric("Total Clicks", f"{int(total_clicks):,}")
+                            with col_d:
+                                st.metric("Avg CTR", f"{avg_ctr:.2f}%")
 
-                            # Simple chart
-                            if 'spend' in paid_data.columns and not paid_data['spend'].isna().all():
-                                fig = px.bar(paid_data, x='campaign_name', y='spend', 
-                                           title='Campaign Spend')
-                                st.plotly_chart(fig, use_container_width=True)
+                            # Campaign spend chart with readable labels
+                            if 'spend' in paid_data.columns and 'campaign_name' in paid_data.columns:
+                                campaign_sums = paid_data.groupby('campaign_name')['spend'].sum().reset_index()
+                                if not campaign_sums.empty:
+                                    fig = go.Figure(data=[
+                                        go.Bar(
+                                            x=campaign_sums['campaign_name'],
+                                            y=campaign_sums['spend'],
+                                            text=[f"${x:.0f}" for x in campaign_sums['spend']],
+                                            textposition='auto',
+                                        )
+                                    ])
+                                    fig.update_layout(
+                                        title="Campaign Spend",
+                                        xaxis_title="Campaign",
+                                        yaxis_title="Spend ($)",
+                                        xaxis_tickangle=-45,
+                                        height=400
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+
+                            # Show creative previews if available
+                            if include_creatives and 'creative_image_url' in paid_data.columns:
+                                st.markdown("---")
+                                st.subheader("🎨 Ad Creative Previews")
+                                
+                                # Group by campaign for better organization
+                                for campaign_name in paid_data['campaign_name'].unique():
+                                    if pd.notna(campaign_name):
+                                        campaign_data = paid_data[paid_data['campaign_name'] == campaign_name]
+                                        
+                                        with st.expander(f"📊 {campaign_name}", expanded=True):
+                                            for _, row in campaign_data.iterrows():
+                                                if pd.notna(row.get('ad_name')):
+                                                    col_img, col_details = st.columns([1, 2])
+                                                    
+                                                    with col_img:
+                                                        img_url = row.get('creative_image_url') or row.get('creative_thumbnail_url')
+                                                        if img_url and pd.notna(img_url):
+                                                            try:
+                                                                st.image(img_url, width=200, caption="Creative Preview")
+                                                            except Exception as e:
+                                                                st.warning(f"Could not load image: {e}")
+                                                        else:
+                                                            st.info("No preview image available")
+                                                    
+                                                    with col_details:
+                                                        st.markdown(f"**Ad:** {row.get('ad_name', 'Unknown')}")
+                                                        
+                                                        if pd.notna(row.get('creative_title')):
+                                                            st.markdown(f"**Title:** {row['creative_title']}")
+                                                        
+                                                        if pd.notna(row.get('creative_body')):
+                                                            st.write(f"**Text:** {row['creative_body']}")
+                                                        
+                                                        # Performance metrics with better formatting
+                                                        metrics_cols = st.columns(4)
+                                                        with metrics_cols[0]:
+                                                            st.metric("Impressions", f"{int(row.get('impressions', 0)):,}")
+                                                        with metrics_cols[1]:
+                                                            st.metric("Clicks", f"{int(row.get('clicks', 0)):,}")
+                                                        with metrics_cols[2]:
+                                                            st.metric("Spend", f"${row.get('spend', 0):.2f}")
+                                                        with metrics_cols[3]:
+                                                            ctr = row.get('ctr', 0)
+                                                            st.metric("CTR", f"{ctr:.2f}%" if ctr else "0%")
+                                                        
+                                                        if pd.notna(row.get('creative_object_url')):
+                                                            st.markdown(f"🔗 [View Ad Destination]({row['creative_object_url']})")
+                                                    
+                                                    st.markdown("---")
+                            else:
+                                # Show basic data table if no creatives
+                                st.subheader("📊 Campaign Data")
+                                display_columns = ['campaign_name', 'impressions', 'clicks', 'spend', 'ctr']
+                                available_columns = [col for col in display_columns if col in paid_data.columns]
+                                if available_columns:
+                                    st.dataframe(paid_data[available_columns])
+                                else:
+                                    st.dataframe(paid_data)
                         else:
                             st.info("No paid campaign data available for the selected time range")
                     except Exception as e:
@@ -351,37 +434,121 @@ def main():
                                             metrics_available = ig_data['metric'].unique().tolist()
                                             st.info(f"Available metrics: {', '.join(metrics_available)}")
 
-                                            # Media selector for detailed view
-                                            media_ids = ig_data['media_id'].unique().tolist()
-                                            if media_ids:
-                                                selected_media = st.selectbox("Select media for detailed view:", media_ids)
-                                                media_details = ig_data[ig_data['media_id'] == selected_media]
-                                                if not media_details.empty:
-                                                    st.subheader(f"Media: {selected_media}")
-                                                    caption = media_details['caption'].iloc[0]
-                                                    if caption:
-                                                        st.text(f"Caption: {caption}")
+                                            # Build unique media list with readable labels
+                                            ig_unique = ig_data[['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url']].drop_duplicates(subset=['media_id'])
+                                            
+                                            if not ig_unique.empty:
+                                                # Create readable labels for post selection
+                                                labels = {}
+                                                for _, row in ig_unique.iterrows():
+                                                    date_part = row['timestamp'].split('T')[0] if row['timestamp'] else 'Unknown date'
+                                                    caption_part = row['caption'][:50] + "..." if row['caption'] and len(row['caption']) > 50 else row['caption'] or 'No caption'
+                                                    labels[row['media_id']] = f"{date_part}: {caption_part}"
 
-                                                    # Show metrics for this media
-                                                    metrics_df = media_details[['metric', 'value']].copy()
-                                                    st.dataframe(metrics_df)
+                                                # Media selector with readable labels
+                                                selected_media = st.selectbox(
+                                                    "Select post to inspect:", 
+                                                    options=list(labels.keys()), 
+                                                    format_func=lambda mid: labels[mid]
+                                                )
+                                                
+                                                # Show selected post details
+                                                sel_row = ig_unique[ig_unique['media_id'] == selected_media].iloc[0]
+                                                
+                                                col_post_img, col_post_details = st.columns([1, 2])
+                                                
+                                                with col_post_img:
+                                                    img_url = sel_row.get('media_url') or sel_row.get('thumbnail_url')
+                                                    if img_url and pd.notna(img_url):
+                                                        try:
+                                                            st.image(img_url, width=300, caption="Instagram Post")
+                                                        except Exception as e:
+                                                            st.warning(f"Could not load image: {e}")
+                                                    else:
+                                                        st.info("No preview image available")
+                                                
+                                                with col_post_details:
+                                                    if pd.notna(sel_row.get('permalink')):
+                                                        st.markdown(f"🔗 [View on Instagram]({sel_row['permalink']})")
+                                                    
+                                                    if pd.notna(sel_row.get('caption')):
+                                                        st.markdown(f"**Caption:** {sel_row['caption']}")
+                                                    
+                                                    # Show metrics for this post
+                                                    sel_metrics = ig_data[ig_data['media_id'] == selected_media][['metric', 'value']]
+                                                    if not sel_metrics.empty:
+                                                        st.subheader("📊 Post Metrics")
+                                                        
+                                                        # Display metrics in columns for better readability
+                                                        metrics_cols = st.columns(min(len(sel_metrics), 4))
+                                                        for idx, (_, metric_row) in enumerate(sel_metrics.iterrows()):
+                                                            with metrics_cols[idx % 4]:
+                                                                st.metric(
+                                                                    metric_row['metric'].replace('_', ' ').title(),
+                                                                    f"{int(metric_row['value']):,}" if metric_row['value'] else "0"
+                                                                )
+                                                        
+                                                        # Bar chart of metrics for this post
+                                                        fig = go.Figure(data=[
+                                                            go.Bar(
+                                                                x=sel_metrics['metric'],
+                                                                y=sel_metrics['value'],
+                                                                text=[f"{int(x):,}" for x in sel_metrics['value']],
+                                                                textposition='auto',
+                                                            )
+                                                        ])
+                                                        fig.update_layout(
+                                                            title="Post Performance Metrics",
+                                                            xaxis_title="Metric",
+                                                            yaxis_title="Value",
+                                                            xaxis_tickangle=-45,
+                                                            height=400
+                                                        )
+                                                        st.plotly_chart(fig, use_container_width=True)
 
-                                            # Display full data table
-                                            st.dataframe(ig_data)
-
-                                            # Chart for Instagram impressions if available
-                                            impressions_data = ig_data[ig_data['metric'] == 'impressions']
-                                            if not impressions_data.empty:
-                                                fig = px.bar(impressions_data, x='media_id', y='value', 
-                                                           title='Instagram Media Impressions')
-                                                st.plotly_chart(fig, use_container_width=True)
-
-                                            # Chart for reach if available
-                                            reach_data = ig_data[ig_data['metric'] == 'reach']
-                                            if not reach_data.empty:
-                                                fig = px.bar(reach_data, x='media_id', y='value', 
-                                                           title='Instagram Media Reach')
-                                                st.plotly_chart(fig, use_container_width=True)
+                                                st.markdown("---")
+                                                
+                                                # Aggregate metrics over time with improved readability
+                                                st.subheader("📈 Performance Over Time")
+                                                ig_data['date'] = pd.to_datetime(ig_data['timestamp']).dt.date
+                                                df_pivot = ig_data.pivot_table(
+                                                    index='date', 
+                                                    columns='metric', 
+                                                    values='value', 
+                                                    aggfunc='sum'
+                                                ).reset_index()
+                                                
+                                                if not df_pivot.empty:
+                                                    fig_time = go.Figure()
+                                                    
+                                                    if 'impressions' in df_pivot.columns:
+                                                        fig_time.add_trace(go.Scatter(
+                                                            x=df_pivot['date'],
+                                                            y=df_pivot['impressions'],
+                                                            mode='lines+markers',
+                                                            name='Impressions',
+                                                            line=dict(width=3)
+                                                        ))
+                                                    
+                                                    if 'reach' in df_pivot.columns:
+                                                        fig_time.add_trace(go.Scatter(
+                                                            x=df_pivot['date'],
+                                                            y=df_pivot['reach'],
+                                                            mode='lines+markers',
+                                                            name='Reach',
+                                                            line=dict(width=3)
+                                                        ))
+                                                    
+                                                    fig_time.update_layout(
+                                                        title="Instagram Performance Trends",
+                                                        xaxis_title="Date",
+                                                        yaxis_title="Value",
+                                                        height=400,
+                                                        legend=dict(x=0, y=1)
+                                                    )
+                                                    st.plotly_chart(fig_time, use_container_width=True)
+                                            else:
+                                                st.warning("No Instagram media found for the selected period")
                                     else:
                                         st.dataframe(organic_data)
 

@@ -2,10 +2,24 @@
 Facebook Ads API integration for fetching paid campaign performance data.
 Official docs: https://developers.facebook.com/docs/marketing-api/insights/
 """
-import logging
+import os
+import requests
 import pandas as pd
+import logging
 from datetime import datetime, timedelta
-from fb_client import fb_client
+from typing import Dict, List, Optional
+from config import config
+
+# Facebook Business SDK imports for creative previews
+# Official docs: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/
+try:
+    from facebook_business.adobjects.campaign import Campaign
+    from facebook_business.adobjects.ad import Ad
+    from facebook_business.adobjects.adcreative import AdCreative
+    CREATIVE_SDK_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Creative SDK imports not available: {e}")
+    CREATIVE_SDK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +130,155 @@ def get_campaign_performance(date_preset="last_7d", since=None, until=None, extr
         until=until
     )
 
-def get_campaign_performance_summary(campaign_ids=None, date_preset='last_7d'):
+def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enrich campaign performance data with ad creative previews.
+
+    Official docs: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/
+
+    Args:
+        df_campaigns: DataFrame with campaign performance metrics
+
+    Returns:
+        DataFrame with creative preview fields added
+    """
+    if not CREATIVE_SDK_AVAILABLE:
+        logger.warning("Creative SDK not available, returning campaigns without creative data")
+        return df_campaigns
+
+    if df_campaigns.empty:
+        return pd.DataFrame(columns=[
+            "campaign_id", "campaign_name", "ad_id", "ad_name", "creative_id", "creative_name",
+            "creative_body", "creative_title", "creative_image_url", "creative_thumbnail_url",
+            "creative_object_url", "impressions", "clicks", "spend", "reach", "frequency", 
+            "ctr", "cpc", "date_start", "date_stop"
+        ])
+
+    records = []
+
+    for _, row in df_campaigns.iterrows():
+        campaign_id = row.get('campaign_id')
+        campaign_name = row.get('campaign_name')
+
+        if not campaign_id:
+            continue
+
+        try:
+            # Fetch ads for this campaign
+            # Official docs: https://developers.facebook.com/docs/marketing-api/reference/campaign/ads/
+            ads = Campaign(campaign_id).get_ads(fields=[
+                Ad.Field.id,
+                Ad.Field.name,
+                Ad.Field.creative
+            ])
+
+            for ad in ads:
+                ad_id = ad.get(Ad.Field.id)
+                ad_name = ad.get(Ad.Field.name)
+                creative_id = None
+                creative_name = creative_body = creative_title = None
+                creative_image_url = creative_thumbnail_url = creative_object_url = None
+
+                # Extract creative info
+                creative_info = ad.get(Ad.Field.creative)
+                if creative_info:
+                    creative_id = creative_info.get('id')
+
+                    if creative_id:
+                        try:
+                            # Fetch creative details with preview URLs
+                            creative = AdCreative(creative_id).api_get(fields=[
+                                AdCreative.Field.name,
+                                AdCreative.Field.body,
+                                AdCreative.Field.title,
+                                AdCreative.Field.image_url,
+                                AdCreative.Field.thumbnail_url,
+                                AdCreative.Field.object_url
+                            ])
+
+                            creative_name = creative.get(AdCreative.Field.name)
+                            creative_body = creative.get(AdCreative.Field.body)
+                            creative_title = creative.get(AdCreative.Field.title)
+                            creative_image_url = creative.get(AdCreative.Field.image_url)
+                            creative_thumbnail_url = creative.get(AdCreative.Field.thumbnail_url)
+                            creative_object_url = creative.get(AdCreative.Field.object_url)
+
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch creative details for creative {creative_id}: {e}")
+
+                # Merge with performance row
+                record = {
+                    "campaign_id": campaign_id,
+                    "campaign_name": campaign_name,
+                    "ad_id": ad_id,
+                    "ad_name": ad_name,
+                    "creative_id": creative_id,
+                    "creative_name": creative_name,
+                    "creative_body": creative_body,
+                    "creative_title": creative_title,
+                    "creative_image_url": creative_image_url,
+                    "creative_thumbnail_url": creative_thumbnail_url,
+                    "creative_object_url": creative_object_url,
+                }
+
+                # Copy performance metrics from row
+                for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'date_start', 'date_stop']:
+                    record[col] = row.get(col, 0)
+
+                records.append(record)
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch ads for campaign {campaign_id}: {e}")
+            # Add campaign row without creative data
+            record = {
+                "campaign_id": campaign_id,
+                "campaign_name": campaign_name,
+                "ad_id": None,
+                "ad_name": None,
+                "creative_id": None,
+                "creative_name": None,
+                "creative_body": None,
+                "creative_title": None,
+                "creative_image_url": None,
+                "creative_thumbnail_url": None,
+                "creative_object_url": None,
+            }
+            for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'date_start', 'date_stop']:
+                record[col] = row.get(col, 0)
+            records.append(record)
+
+    if not records:
+        return pd.DataFrame(columns=[
+            "campaign_id", "campaign_name", "ad_id", "ad_name", "creative_id", "creative_name",
+            "creative_body", "creative_title", "creative_image_url", "creative_thumbnail_url", 
+            "creative_object_url", "impressions", "clicks", "spend", "reach", "frequency",
+            "ctr", "cpc", "date_start", "date_stop"
+        ])
+
+    df_enriched = pd.DataFrame(records)
+    logger.info(f"Enriched {len(df_enriched)} campaign records with creative data")
+    return df_enriched
+
+def get_campaign_performance_with_creatives(date_preset: str = "last_7d", include_creatives: bool = True) -> pd.DataFrame:
+    """
+    Get campaign performance data enriched with creative previews.
+
+    Args:
+        date_preset: Date range preset
+        include_creatives: Whether to fetch creative preview data
+
+    Returns:
+        DataFrame with campaign performance and creative data
+    """
+    # Get base campaign performance
+    df_campaigns = get_campaign_performance(date_preset=date_preset)
+
+    if include_creatives and not df_campaigns.empty:
+        return enrich_with_creatives(df_campaigns)
+
+    return df_campaigns
+
+def get_campaign_performance_summary(date_preset: str = "last_7d") -> Dict:
     """
     Get summarized campaign performance data.
 
@@ -220,3 +382,43 @@ def get_real_time_insights(campaign_ids=None):
         date_preset="today",
         filtering=filtering
     )
+
+if __name__ == "__main__":
+    # Test creative preview functionality
+    import os
+
+    # Set test environment variables (replace with actual values)
+    # os.environ["META_ACCESS_TOKEN"] = "<your_access_token>"
+    # os.environ["AD_ACCOUNT_ID"] = "<your_ad_account_id>"
+
+    logger.info("🧪 Testing paid campaign fetch with creative previews...")
+
+    try:
+        # Test campaign performance with creatives
+        df_with_creatives = get_campaign_performance_with_creatives(
+            date_preset="last_7d", 
+            include_creatives=True
+        )
+        print(f"Campaign data with creatives: {len(df_with_creatives)} records")
+        print("Columns:", df_with_creatives.columns.tolist())
+
+        if not df_with_creatives.empty:
+            print("\nSample creative data:")
+            creative_columns = ['campaign_name', 'ad_name', 'creative_title', 'creative_image_url']
+            available_creative_cols = [col for col in creative_columns if col in df_with_creatives.columns]
+            if available_creative_cols:
+                print(df_with_creatives[available_creative_cols].head())
+
+            # Check for preview URLs
+            has_images = df_with_creatives['creative_image_url'].notna().sum()
+            has_thumbnails = df_with_creatives['creative_thumbnail_url'].notna().sum()
+            print(f"\nPreview URLs found: {has_images} images, {has_thumbnails} thumbnails")
+
+        else:
+            print("No campaign data returned")
+
+    except Exception as e:
+        print(f"Test failed: {e}")
+        logger.error(f"Test error: {e}", exc_info=True)
+
+    # Example usage
