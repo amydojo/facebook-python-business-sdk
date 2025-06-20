@@ -41,17 +41,36 @@ FALLBACK_PAGE_METRICS = [
     "page_fan_removes"
 ]
 
-# Valid Instagram metrics for Graph API v23.0
+# Comprehensive Instagram metrics for Graph API v23.0
 # Official docs: https://developers.facebook.com/docs/instagram-api/reference/ig-media/insights
 VALID_IG_METRICS = {
-    "impressions", "reach", "replies", "saved", "video_views", "likes", "comments",
-    "shares", "plays", "total_interactions", "follows", "profile_visits",
-    "profile_activity", "navigation", "ig_reels_video_view_total_time",
-    "ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count", "views"
+    # Core engagement metrics
+    "impressions", "reach", "likes", "comments", "shares", "saves", "saved",
+    "total_interactions", "replies", "follows", "profile_visits", "profile_activity",
+    
+    # Video metrics (general)
+    "video_views", "plays", "views",
+    
+    # Reels-specific metrics (comprehensive)
+    "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", 
+    "clips_replays_count", "ig_reels_aggregated_all_plays_count",
+    "ig_reels_plays", "ig_reels_reach", "ig_reels_impressions",
+    "ig_reels_likes", "ig_reels_comments", "ig_reels_shares",
+    "ig_reels_saves", "ig_reels_total_interactions",
+    
+    # Story metrics
+    "taps_forward", "taps_back", "exits", "replies",
+    
+    # Navigation metrics
+    "navigation",
+    
+    # Additional engagement
+    "website_clicks", "get_directions_clicks", "text_message_clicks",
+    "email_contacts", "phone_call_clicks"
 }
 
-# Default Instagram metrics (safe subset)
-DEFAULT_IG_METRICS = ['impressions', 'reach', 'total_interactions']
+# Enhanced default Instagram metrics including Reels
+DEFAULT_IG_METRICS = ['impressions', 'reach', 'total_interactions', 'plays', 'ig_reels_plays']
 
 def get_page_access_token():
     """
@@ -346,6 +365,100 @@ def fetch_latest_page_insights(metrics: List[str] = None, period: str = "day") -
     logger.info(f"Fetching latest Page insights for date: {yesterday}")
     return fetch_page_insights(metrics=metrics, since=yesterday, until=yesterday, period=period)
 
+def discover_ig_media_metrics(ig_user_id: str, sample_media_id: str = None) -> List[str]:
+    """
+    Discover available Instagram metrics by testing with a sample media.
+    
+    Args:
+        ig_user_id: Instagram Business User ID
+        sample_media_id: Optional specific media ID to test with
+        
+    Returns:
+        List of available metric names for this account/media type
+    """
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    
+    if not ig_user_id or not token:
+        logger.warning("Cannot discover metrics: missing IG_USER_ID or token")
+        return list(DEFAULT_IG_METRICS)
+    
+    # Get a sample media if not provided
+    if not sample_media_id:
+        try:
+            url_media = f"{GRAPH_API_BASE}/{ig_user_id}/media"
+            params_media = {"fields": "id,media_type", "access_token": token, "limit": 1}
+            resp = requests.get(url_media, params=params_media, timeout=10)
+            
+            if resp.status_code == 200:
+                body = resp.json()
+                media_list = body.get("data", [])
+                if media_list:
+                    sample_media_id = media_list[0].get("id")
+                    logger.info(f"Using sample media for metric discovery: {sample_media_id}")
+            
+            if not sample_media_id:
+                logger.warning("No sample media found for metric discovery")
+                return list(DEFAULT_IG_METRICS)
+                
+        except Exception as e:
+            logger.error(f"Error getting sample media for discovery: {e}")
+            return list(DEFAULT_IG_METRICS)
+    
+    # Test metrics in batches to find supported ones
+    available_metrics = []
+    test_batches = [
+        # Core metrics
+        ["impressions", "reach", "likes", "comments", "shares"],
+        # Video/Reels metrics  
+        ["plays", "video_views", "ig_reels_plays", "ig_reels_video_view_total_time"],
+        # Advanced Reels metrics
+        ["ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count"],
+        # Engagement metrics
+        ["total_interactions", "saves", "saved", "replies"],
+        # Additional metrics
+        ["profile_visits", "follows", "website_clicks"]
+    ]
+    
+    for batch in test_batches:
+        metric_str = ",".join(batch)
+        url = f"{GRAPH_API_BASE}/{sample_media_id}/insights"
+        params = {"metric": metric_str, "access_token": token}
+        
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                body = resp.json()
+                if "data" in body:
+                    # All metrics in this batch are supported
+                    available_metrics.extend(batch)
+                    logger.info(f"✅ Supported metric batch: {batch}")
+                else:
+                    logger.warning(f"❌ Unsupported metric batch: {batch}")
+            else:
+                # Test individual metrics in this batch
+                for metric in batch:
+                    single_resp = requests.get(url, params={"metric": metric, "access_token": token}, timeout=5)
+                    if single_resp.status_code == 200:
+                        single_body = single_resp.json()
+                        if "data" in single_body:
+                            available_metrics.append(metric)
+                            logger.info(f"✅ Supported individual metric: {metric}")
+                        else:
+                            logger.debug(f"❌ Unsupported metric: {metric}")
+                    else:
+                        logger.debug(f"❌ Unsupported metric: {metric} (status: {single_resp.status_code})")
+                        
+        except Exception as e:
+            logger.warning(f"Error testing metric batch {batch}: {e}")
+            continue
+    
+    if not available_metrics:
+        logger.warning("No metrics discovered, using defaults")
+        return list(DEFAULT_IG_METRICS)
+    
+    logger.info(f"🔍 Discovered {len(available_metrics)} available Instagram metrics: {available_metrics}")
+    return available_metrics
+
 def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until: Optional[str] = None, metrics: Optional[List[str]] = None) -> pd.DataFrame:
     """
     Fetch Instagram media insights in long-format DataFrame with robust error handling.
@@ -368,17 +481,28 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
         logger.error("fetch_ig_media_insights: Missing IG_USER_ID or token.")
         return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value'])
 
-    # Determine initial metrics - default to safe subset
-    default_metrics = ["impressions", "reach", "total_interactions"]
-    req_metrics = metrics or default_metrics
+    # Determine initial metrics with dynamic discovery
+    if not metrics:
+        # Try to discover available metrics first
+        logger.info("🔍 Attempting to discover available Instagram metrics...")
+        try:
+            discovered_metrics = discover_ig_media_metrics(ig_user_id)
+            req_metrics = discovered_metrics[:5]  # Use top 5 discovered metrics
+            logger.info(f"Using discovered metrics: {req_metrics}")
+        except Exception as e:
+            logger.warning(f"Metric discovery failed: {e}, using defaults")
+            req_metrics = DEFAULT_IG_METRICS
+    else:
+        req_metrics = metrics
 
     # Filter against VALID_IG_METRICS
     valid_initial = [m for m in req_metrics if m in VALID_IG_METRICS]
     if not valid_initial:
-        logger.error(f"No valid IG metrics in requested {req_metrics}")
+        logger.error(f"❌ No valid IG metrics in requested {req_metrics}")
+        logger.info(f"Available metrics: {sorted(VALID_IG_METRICS)}")
         return pd.DataFrame(columns=['media_id', 'timestamp', 'caption', 'media_url', 'permalink', 'thumbnail_url', 'metric', 'value'])
 
-    logger.info(f"Initial valid Instagram metrics: {valid_initial}")
+    logger.info(f"✅ Initial valid Instagram metrics: {valid_initial}")
 
     # Fetch media list via Graph API
     url_media = f"{GRAPH_API_BASE}/{ig_user_id}/media"
@@ -469,27 +593,38 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
                 # Handle 400 error indicating unsupported metric for this media type
                 elif resp_insights.status_code == 400 and "error" in body_insights:
                     error_msg = body_insights["error"].get("message", "")
+                    error_code = body_insights["error"].get("code", "")
+                    
+                    logger.warning(f"📱 Media {media_id} insights error: {error_msg} (code: {error_code})")
+                    logger.info(f"📊 Media type/product: {media.get('media_type')}/{media.get('media_product_type')}")
+                    logger.info(f"🎯 Attempted metrics: {metrics_for_media}")
 
                     # Try to detect which metric caused the error by checking if metric name appears in error message
                     # e.g., "Media does not support the impressions metric for this media product type"
                     unsupported_metric = None
                     for metric in metrics_for_media:
-                        if metric in error_msg:
+                        if metric in error_msg.lower():
                             unsupported_metric = metric
                             break
 
                     if unsupported_metric:
                         metrics_for_media.remove(unsupported_metric)
-                        logger.info(f"Media {media_id}: removed unsupported metric '{unsupported_metric}' and retrying with {len(metrics_for_media)} remaining")
+                        logger.info(f"🔄 Media {media_id}: removed unsupported metric '{unsupported_metric}', retrying with {metrics_for_media}")
 
                         if not metrics_for_media:
-                            logger.warning(f"Media {media_id}: no metrics left after removing unsupported ones, skipping")
+                            logger.warning(f"❌ Media {media_id}: no metrics left after removing unsupported ones, skipping")
                             break
                         continue
                     else:
-                        # Couldn't identify the problematic metric, skip this media
-                        logger.warning(f"Media {media_id}: Could not identify unsupported metric from error: {error_msg}")
-                        break
+                        # Try removing metrics one by one to isolate the problem
+                        if len(metrics_for_media) > 1:
+                            removed_metric = metrics_for_media.pop()
+                            logger.info(f"🔍 Media {media_id}: couldn't identify problematic metric, removing '{removed_metric}' and retrying")
+                            continue
+                        else:
+                            # Only one metric left and it's still failing
+                            logger.warning(f"❌ Media {media_id}: last metric '{metrics_for_media[0]}' unsupported for this media type")
+                            break
 
                 else:
                     # Other error, skip this media
@@ -673,7 +808,18 @@ def get_available_page_metrics():
 
 def get_valid_instagram_metrics():
     """Get list of valid Instagram metrics for dashboard display."""
-    return list(VALID_IG_METRICS)
+    return sorted(list(VALID_IG_METRICS))
+
+def get_instagram_metrics_by_category():
+    """Get Instagram metrics organized by category for better dashboard display."""
+    return {
+        "Core Engagement": ["impressions", "reach", "likes", "comments", "shares", "saves", "total_interactions"],
+        "Video & Reels": ["plays", "video_views", "ig_reels_plays", "ig_reels_video_view_total_time", "ig_reels_avg_watch_time"],
+        "Reels Advanced": ["clips_replays_count", "ig_reels_aggregated_all_plays_count", "ig_reels_reach", "ig_reels_impressions"],
+        "Profile Activity": ["profile_visits", "follows", "website_clicks", "get_directions_clicks"],
+        "Story Metrics": ["taps_forward", "taps_back", "exits", "replies"],
+        "Other": ["navigation", "email_contacts", "phone_call_clicks"]
+    }
 
 if __name__ == "__main__":
     # Test metadata fetch with fallback
@@ -692,13 +838,26 @@ if __name__ == "__main__":
         if not df_latest.empty:
             print(df_latest.head())
 
-    # Test Instagram latest with comprehensive example
+    # Test Instagram metric discovery
     ig_id = os.getenv("IG_USER_ID")
     if ig_id:
-        logger.info("🧪 Testing latest Instagram insights (long-format)...")
-        df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions", "reach", "total_interactions"])
-        print(f"Latest IG insights: {len(df_ig)} records")
-        print("Columns:", df_ig.columns.tolist())
+        logger.info("🧪 Testing Instagram metric discovery...")
+        try:
+            discovered = discover_ig_media_metrics(ig_id)
+            print(f"🔍 Discovered Instagram metrics: {discovered}")
+            
+            # Test with discovered metrics
+            logger.info("🧪 Testing latest Instagram insights with discovered metrics...")
+            df_ig = fetch_latest_ig_media_insights(ig_id, metrics=discovered[:3])
+            print(f"Latest IG insights: {len(df_ig)} records")
+            print("Columns:", df_ig.columns.tolist())
+        except Exception as e:
+            logger.error(f"Metric discovery test failed: {e}")
+            
+            # Fallback test
+            logger.info("🧪 Testing latest Instagram insights (fallback)...")
+            df_ig = fetch_latest_ig_media_insights(ig_id, metrics=["impressions", "reach", "total_interactions"])
+            print(f"Latest IG insights (fallback): {len(df_ig)} records")
 
         if not df_ig.empty:
             print("\nSample records:")
