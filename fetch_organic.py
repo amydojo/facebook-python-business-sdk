@@ -306,63 +306,33 @@ def fetch_ig_media_insights(media_id, metrics=None, period='lifetime'):
         logger.error(f"Unexpected error fetching Instagram media insights for {media_id}: {e}")
         return pd.DataFrame()
 
-def get_organic_insights(days=7):
+def get_organic_insights(page_id, access_token, since_date, until_date):
     """
-    Get organic insights for Facebook Page and Instagram.
-
-    Args:
-        days: Number of days to look back
-
-    Returns:
-        dict with organic insights data
+    Fetch organic insights for a Facebook page.
     """
+    logger = logging.getLogger(__name__)
+
+    # Check if Facebook SDK was imported successfully
+    if FacebookAdsApi is None or Page is None:
+        logger.error("Facebook Business SDK not available due to import errors")
+        return {
+            'page_insights': [],
+            'instagram_insights': [],
+            'summary': {'error': 'Facebook SDK not available'}
+        }
+
     try:
-        if not config.PAGE_ID or not config.META_ACCESS_TOKEN:
-            logger.error("PAGE_ID or META_ACCESS_TOKEN not configured")
-            return {
-                'page_insights': [],
-                'recent_posts': [],
-                'posts_count': 0,
-                'instagram_user_id': None,
-                'error': 'PAGE_ID or META_ACCESS_TOKEN not configured',
-                'date_range': {
-                    'start': (datetime.now().date() - timedelta(days=days)).strftime('%Y-%m-%d'),
-                    'end': datetime.now().date().strftime('%Y-%m-%d')
-                }
-            }
-
-        # Calculate date range
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
-
-        logger.info(f"Fetching organic insights from {start_date} to {end_date}")
-
-        # Initialize Facebook API
-        FacebookAdsApi.init(
-            app_id=config.META_APP_ID,
-            app_secret=config.META_APP_SECRET,
-            access_token=config.META_ACCESS_TOKEN
-        )
-
-        page = Page(config.PAGE_ID)
-
-        # Get Instagram User ID if available
-        instagram_user_id = None
-        try:
-            # Get Instagram accounts connected to this page
-            instagram_accounts = page.get_instagram_accounts(
-                fields=['id', 'username', 'name']
+        # Initialize Facebook API if not already done
+        if not FacebookAdsApi.get_default_api():
+            FacebookAdsApi.init(
+                app_id=config.META_APP_ID,
+                app_secret=config.META_APP_SECRET,
+                access_token=access_token
             )
-            if instagram_accounts:
-                instagram_account = instagram_accounts[0]  # Get the first connected account
-                instagram_user_id = instagram_account.get('id')
-                logger.info(f"Retrieved Instagram User ID: {instagram_user_id}")
-            else:
-                logger.info("No Instagram accounts found for this page")
-        except Exception as e:
-            logger.warning(f"Could not retrieve Instagram User ID: {e}")
 
-        # Get page insights
+        page = Page(page_id)
+
+        # Fetch page insights
         page_insights = []
         try:
             insights = page.get_insights(
@@ -375,8 +345,8 @@ def get_organic_insights(days=7):
                     'page_content_activity'
                 ],
                 params={
-                    'since': start_date.strftime('%Y-%m-%d'),
-                    'until': end_date.strftime('%Y-%m-%d'),
+                    'since': since_date,
+                    'until': until_date,
                     'period': 'day'
                 }
             )
@@ -385,7 +355,7 @@ def get_organic_insights(days=7):
         except Exception as e:
             logger.error(f"Error fetching page insights: {e}")
 
-        # Get recent posts
+        # Fetch recent posts
         recent_posts = []
         try:
             posts = page.get_posts(
@@ -399,8 +369,8 @@ def get_organic_insights(days=7):
                     'shares'
                 ],
                 params={
-                    'since': start_date.strftime('%Y-%m-%d'),
-                    'until': end_date.strftime('%Y-%m-%d'),
+                    'since': since_date,
+                    'until': until_date,
                     'limit': 50
                 }
             )
@@ -412,12 +382,6 @@ def get_organic_insights(days=7):
         return {
             'page_insights': page_insights,
             'recent_posts': recent_posts,
-            'posts_count': len(recent_posts),
-            'instagram_user_id': instagram_user_id,
-            'date_range': {
-                'start': start_date.strftime('%Y-%m-%d'),
-                'end': end_date.strftime('%Y-%m-%d')
-            }
         }
 
     except Exception as e:
@@ -425,13 +389,7 @@ def get_organic_insights(days=7):
         return {
             'page_insights': [],
             'recent_posts': [],
-            'posts_count': 0,
-            'instagram_user_id': None,
-            'error': str(e),
-            'date_range': {
-                'start': (datetime.now().date() - timedelta(days=days)).strftime('%Y-%m-%d'),
-                'end': datetime.now().date().strftime('%Y-%m-%d')
-            }
+            'summary': {'error': str(e)}
         }
 
 def get_organic_performance_summary(days=7):
