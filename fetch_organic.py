@@ -1,4 +1,3 @@
-"""Update Graph API version to v23.0 for both Facebook and Instagram"""
 """
 Fetch organic content insights from Facebook Pages and Instagram.
 Handles both Facebook Page insights and Instagram Business Account insights.
@@ -7,6 +6,8 @@ Official docs:
 - Page Insights: https://developers.facebook.com/docs/graph-api/reference/page/insights/
 - Instagram Insights: https://developers.facebook.com/docs/instagram-api/guides/insights/
 - Token requirements: https://developers.facebook.com/docs/facebook-login/access-tokens
+
+Updated Graph API version to v23.0 for both Facebook and Instagram
 """
 import os
 import requests
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 # Graph API version for consistent endpoint calls
 GRAPH_API_VERSION = os.getenv('GRAPH_API_VERSION', 'v23.0')
-IG_GRAPH_API_VERSION = os.getenv('IG_GRAPH_API_VERSION', 'v23.0')
 
 def get_page_access_token():
     """
@@ -203,7 +203,7 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
         metrics = ['impressions', 'reach', 'engagement']
 
     # First, get media list
-    media_url = f"https://graph.facebook.com/{IG_GRAPH_API_VERSION}/{ig_user_id}/media"
+    media_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media"
     media_params = {
         'access_token': page_token,
         'fields': 'id,timestamp,media_type,caption'
@@ -241,7 +241,7 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
         insights_data = []
         for media_item in media_items:
             media_id = media_item['id']
-            insights_url = f"https://graph.facebook.com/{IG_GRAPH_API_VERSION}/{media_id}/insights"
+            insights_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights"
             insights_params = {
                 'access_token': page_token,
                 'metric': ','.join(metrics)
