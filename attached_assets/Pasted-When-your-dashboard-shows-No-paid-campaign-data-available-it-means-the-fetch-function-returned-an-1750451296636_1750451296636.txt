@@ -1,0 +1,231 @@
+When your dashboard shows “No paid campaign data available,” it means the fetch function returned an empty DataFrame (or equivalent “no data”). Let’s walk through the most common causes and how to debug:
+
+---
+
+## 1. Verify Facebook SDK initialization
+
+1. **Check FB client logs**
+
+   * In your `fb_client.init_fb_api()`, add a log right after initialization to confirm you have a valid AdAccount object:
+
+     ```python
+     account = init_fb_api()
+     if account is None:
+         logger.error("FB client init failed: account is None")
+     else:
+         logger.info(f"FB client initialized for Ad Account: {os.getenv('AD_ACCOUNT_ID')}")
+     ```
+   * Ensure you see in logs: `FB client initialized for Ad Account: 860378271946500` (or your ID). If not, fix environment vars (`META_ACCESS_TOKEN`, `AD_ACCOUNT_ID`, etc.).
+
+2. **Confirm access token & permissions**
+
+   * Ensure your `META_ACCESS_TOKEN` is valid (not expired) and includes `ads_read` / `read_insights` scopes.
+   * In the log, if you caught an OAuthException or code 190 earlier, you need to regenerate the token. Test in Graph API Explorer: run
+
+     ```
+     GET /act_<AD_ACCOUNT_ID>/insights?fields=impressions&date_preset=yesterday&access_token=<token>
+     ```
+
+     If that returns data, token is good.
+
+---
+
+## 2. Check date range / presets
+
+1. **Empty date window**
+
+   * If you used a custom range where `since` > `until`, or dates in the future, the API returns no data. Double-check the date inputs in the UI.
+   * Print in logs the actual `since_str` and `until_str` your code sends:
+
+     ```python
+     logger.info(f"Fetching campaign insights for range: since={since_str}, until={until_str}")
+     ```
+   * If using a preset (e.g., `last_7d`), ensure it’s valid and that there was activity in that period.
+
+2. **Time zone awareness**
+
+   * “yesterday” in America/Los\_Angeles: if you run early in the day UTC, the API’s notion of “yesterday” might differ; consider using explicit `time_range` with absolute dates. For example, if today is 2025-06-20 PT, “yesterday” is 2025-06-19:
+
+     ```python
+     df = fetch_ad_insights(level="campaign",
+                            fields=[...],
+                            since="2025-06-19", until="2025-06-19")
+     ```
+   * Try a wider window (e.g., last\_28d) to see if any campaigns have data at all.
+
+---
+
+## 3. Inspect the raw API response
+
+Before converting to DataFrame, log the raw response to see if there’s an error or simply zero rows:
+
+1. **Modify fetch to log response**
+   In `fetch_ad_insights`, right after the SDK call:
+
+   ```python
+   try:
+       insights = account.get_insights(params=params)
+       logger.info(f"Initial insights response object: {insights}")
+       # Optionally inspect first page raw JSON:
+       raw_page = [entry.export_all_data() for entry in insights]
+       logger.info(f"First page data sample: {raw_page[:2]}")
+   except Exception as e:
+       logger.error(f"Error fetching insights: {e}")
+       return pd.DataFrame()
+   ```
+
+   If `raw_page` is empty list `[]`, the API returned no rows. If there’s an error, it will show.
+
+2. **Use Graph Explorer manually**
+
+   * Copy the same request your code is making: same date range, same fields. In Graph Explorer, run:
+
+     ```
+     GET /act_<AD_ACCOUNT_ID>/insights?level=campaign&fields=campaign_id,impressions,clicks,spend&time_range={"since":"YYYY-MM-DD","until":"YYYY-MM-DD"}
+     ```
+   * If Graph Explorer shows data, but your code returns empty, compare the exact parameters (maybe filtering or level mismatch).
+
+---
+
+## 4. Confirm there are active campaigns with data
+
+1. **List campaigns**
+
+   * Use the SDK or HTTP:
+
+     ```python
+     campaigns = account.get_campaigns(fields=['id','name','status'])
+     for c in campaigns:
+         logger.info(f"Campaign: {c['id']} - {c.get('name')} - status {c.get('status')}")
+     ```
+   * If no campaigns or all are inactive or newly created (no spend yet), insights may be empty.
+
+2. **Check spend/activity**
+
+   * A campaign with zero spend/impressions won’t return rows for insights. Ensure you have active campaigns that ran in the date window.
+
+---
+
+## 5. Ensure correct fetch function usage in dashboard
+
+1. **Import and call the right function**
+
+   * If you intended to use a wrapper like `get_campaign_performance(...)`, ensure it calls `fetch_ad_insights(level="campaign", ...)`.
+   * In `dashboard.py`, confirm:
+
+     ```python
+     from fetch_paid import get_campaign_performance
+     # ...
+     if date_preset!="custom":
+         df_campaign = get_campaign_performance(date_preset=date_preset)
+     else:
+         df_campaign = get_campaign_performance(date_preset=None, since=since_str, until=until_str)
+     if df_campaign.empty:
+         st.write("No paid campaign data available")
+     else:
+         st.dataframe(df_campaign)
+     ```
+   * Add logs before the `if df_campaign.empty` to print DataFrame head or shape:
+
+     ```python
+     logger.info(f"Campaign DataFrame shape: {df_campaign.shape}")
+     logger.info(f"Campaign DataFrame columns: {df_campaign.columns.tolist()}")
+     ```
+
+2. **Check for silent exceptions**
+
+   * If your fetch function swallows exceptions and returns empty DF, you may be missing an underlying error. Ensure exceptions during fetch are logged, not suppressed silently:
+
+     ```python
+     except Exception as e:
+         logger.error(f"fetch_ad_insights failed: {e}", exc_info=True)
+         return pd.DataFrame()
+     ```
+
+---
+
+## 6. Permissions & Access scope
+
+1. **Check token scopes**
+
+   * In logs earlier, ensure `ads_read` and `read_insights` are present. If your token lacks those, insights calls return an error or empty.
+   * In Graph Explorer, test with the same token and check if you get permission errors.
+
+2. **Check Business settings**
+
+   * Your user/app must have access to that ad account. Verify in Business Manager that the token user has at least read access.
+
+---
+
+## 7. Testing with minimal code snippet
+
+In a Python REPL or separate script within Replit, isolate the call:
+
+```python
+from fb_client import init_fb_api
+import logging
+logging.basicConfig(level=logging.INFO)
+account = init_fb_api()
+if account:
+    params = {
+        'level': 'campaign',
+        'fields': 'campaign_id,impressions,clicks,spend',
+        'date_preset': 'last_7d'
+    }
+    try:
+        insights = account.get_insights(params=params)
+        rows = [entry.export_all_data() for entry in insights]
+        logging.info(f"Raw campaign insights rows: {rows}")
+    except Exception as e:
+        logging.error(f"Error during manual fetch: {e}", exc_info=True)
+```
+
+* If `rows` is empty, the API truly has no data for last 7 days.
+* If an exception occurs, inspect it.
+
+---
+
+## 8. Broader date window
+
+* Try a longer window: `date_preset="last_28d"` or `"last_90d"`. Maybe campaigns ran earlier but not in the recent short window.
+
+---
+
+## 9. Confirm level and filtering
+
+* If your wrapper accidentally includes a `filtering` parameter or wrong `level`, you might be filtering out everything. Check that `filtering` is None or correct.
+* Example: ensure you’re not filtering by an adset or campaign ID that doesn’t exist.
+
+---
+
+## 10. Final user feedback in UI
+
+* Instead of a generic “No paid campaign data available,” you can provide more context:
+
+  ```python
+  if df_campaign.empty:
+      st.warning("No paid campaign data found. Possible reasons:\n"
+                 "- No active campaigns in the selected date range\n"
+                 "- Access token missing permissions or expired\n"
+                 "- Ad Account ID misconfigured\n"
+                 "- Date range may be incorrect (e.g., future dates)\n"
+                 "Check logs for details.")
+  else:
+      st.dataframe(df_campaign)
+  ```
+* Encourage checking logs or provide a “Test fetch” button that prints raw API response in the UI.
+
+---
+
+## 11. Summary Checklist
+
+1. **FB client**: Confirm `init_fb_api()` returns a valid account object and prints your Ad Account ID.
+2. **Token & permissions**: Validate token in Graph Explorer; ensure scopes include `ads_read`, `read_insights`.
+3. **Date range**: Verify `since` and `until` are correct and there was activity then. Try presets like `yesterday`, `last_28d`.
+4. **Campaign existence**: List campaigns to ensure at least one active campaign existed in that period.
+5. **Raw response logging**: Log/export raw rows to see if API returns `[]` or errors.
+6. **Function import/use**: Ensure your wrapper fetches at correct level (“campaign”) without unintended filters.
+7. **Error handling**: Don’t swallow exceptions silently—log `exc_info=True`.
+8. **UI messaging**: Provide detailed hints when no data shows.
+
+By following these steps, you’ll pinpoint why the DataFrame is empty. Often it’s simply that no campaigns ran in that date window, or the token/permissions aren’t correct, or a filtering mistake. Once you identify the root cause, adjust your code or date range, and you’ll start seeing campaign data in your dashboard instead of that “No paid campaign data available” message. Let me know what you find in the logs! 😊
