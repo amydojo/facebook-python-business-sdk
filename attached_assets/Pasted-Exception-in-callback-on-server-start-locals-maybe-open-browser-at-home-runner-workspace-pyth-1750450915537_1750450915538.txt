@@ -1,0 +1,23 @@
+Exception in callback _on_server_start.<locals>.maybe_open_browser() at /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/web/bootstrap.py:173
+handle: <Handle _on_server_start.<locals>.maybe_open_browser() at /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/web/bootstrap.py:173>
+Traceback (most recent call last):
+  File "/nix/store/nb21sc3npfc8gvazwnrjxpvb5d48jysx-python3-3.12.7/lib/python3.12/asyncio/events.py", line 88, in _run
+    self._context.run(self._callback, *self._args)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/web/bootstrap.py", line 188, in maybe_open_browser
+    util.open_browser(server_util.get_url(addr))
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/util.py", line 83, in open_browser
+    if env_util.is_executable_in_path("xdg-open"):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/env_util.py", line 57, in is_executable_in_path
+    from distutils.spawn import find_executable
+ModuleNotFoundError: No module named 'distutils'
+2025-06-20 20:20:33,112 - data_store - INFO - Database tables initialized successfully
+2025-06-20 20:20:33,113 - data_store - INFO - DataStore initialized with database: campaign_optimizer.db
+2025-06-20 20:20:33,242 - fb_client - ERROR - ❌ Unexpected error during Facebook API initialization: Missing required configuration: AD_ACCOUNT_ID
+2025-06-20 20:20:33.251 Uncaught app exception
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 534, in _run_script
+    exec(code, module.__dict__)
+  File "/home/runner/workspace/dashboard.py", line 15, in <module>
+    from fetch_paid import get_campaign_performance
+ImportError: cannot import name 'get_campaign_performance' from 'fetch_paid' (/home/runner/workspace/fetch_paid.py). Did you mean: 'get_campaign_performance_summary'?
