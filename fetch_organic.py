@@ -49,36 +49,37 @@ FALLBACK_PAGE_METRICS = [
     "page_fan_removes"
 ]
 
-# Updated Instagram metrics for 2025 - curated by media type to avoid invalid field errors
-METRICS_BY_TYPE = {
-    "REELS": ["ig_reels_video_view_total_time", "ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count", "views", "likes", "comments", "shares", "saved", "profile_visits", "follows"],
-    "VIDEO": ["video_views", "total_interactions", "likes", "comments", "shares", "saved", "profile_visits", "follows"],
-    "IMAGE": ["impressions", "reach", "total_interactions", "likes", "comments", "shares", "saved", "profile_visits", "follows"],
-    "CAROUSEL_ALBUM": ["impressions", "reach", "total_interactions", "likes", "comments", "shares", "saved", "profile_visits", "follows"]
+# Updated Instagram metrics for 2025 - removed deprecated metrics like 'plays' and 'clips_replays_count'
+SUPPORTED_METRICS_BY_PRODUCT = {
+    "REELS": [
+        "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", 
+        "ig_reels_aggregated_all_plays_count", "views", "likes", "comments", 
+        "shares", "saved", "profile_visits", "follows", "reach", "impressions"
+    ],
+    "FEED": [
+        "impressions", "reach", "total_interactions", "likes", "comments", 
+        "shares", "saved", "profile_visits", "follows"
+    ],
+    "VIDEO": [
+        "video_views", "total_interactions", "likes", "comments", "shares", 
+        "saved", "profile_visits", "follows", "reach", "impressions"
+    ],
+    "IMAGE": [
+        "impressions", "reach", "total_interactions", "likes", "comments", 
+        "shares", "saved", "profile_visits", "follows"
+    ],
+    "CAROUSEL_ALBUM": [
+        "impressions", "reach", "total_interactions", "likes", "comments", 
+        "shares", "saved", "profile_visits", "follows"
+    ]
 }
 
-# Legacy fallback for compatibility
-FALLBACK_IG_METRICS = {
-    # Core engagement metrics (most reliable)
-    "reach": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "total_interactions": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "comments": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "shares": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "saved": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "profile_visits": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "follows": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-
-    # Video/Reels specific metrics (updated for 2025)
-    "video_views": ["VIDEO"],
-    "ig_reels_avg_watch_time": ["REEL"],
-    "ig_reels_video_view_total_time": ["REEL"],
-    "clips_replays_count": ["REEL"],
-    "ig_reels_aggregated_all_plays_count": ["REEL"],
-
-    # Navigation and interaction metrics
-    "website_clicks": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "email_contacts": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    "phone_call_clicks": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
+# Fallback metrics by media type (without product type)
+METRICS_BY_TYPE = {
+    "REELS": SUPPORTED_METRICS_BY_PRODUCT["REELS"],
+    "VIDEO": SUPPORTED_METRICS_BY_PRODUCT["VIDEO"], 
+    "IMAGE": SUPPORTED_METRICS_BY_PRODUCT["IMAGE"],
+    "CAROUSEL_ALBUM": SUPPORTED_METRICS_BY_PRODUCT["CAROUSEL_ALBUM"]
 }
 
 def get_valid_ig_metrics_for_media(media_type: str, media_product_type: str) -> List[str]:
@@ -92,15 +93,25 @@ def get_valid_ig_metrics_for_media(media_type: str, media_product_type: str) -> 
     Returns:
         List of valid metric names for this media type
     """
-    # Prioritize product type (REELS) over generic media type
-    if media_product_type and media_product_type.upper() == "REELS":
-        return METRICS_BY_TYPE.get("REELS", [])
+    # Log the product type for debugging
+    logger.debug(f"Getting metrics for media_type: {media_type}, media_product_type: {media_product_type}")
     
+    # Prioritize product type over generic media type
+    if media_product_type:
+        product_key = media_product_type.upper()
+        if product_key in SUPPORTED_METRICS_BY_PRODUCT:
+            logger.debug(f"Using product-specific metrics for {product_key}")
+            return SUPPORTED_METRICS_BY_PRODUCT[product_key]
+    
+    # Fallback to media type
     if media_type:
         media_key = media_type.upper()
-        return METRICS_BY_TYPE.get(media_key, [])
+        if media_key in METRICS_BY_TYPE:
+            logger.debug(f"Using media-type metrics for {media_key}")
+            return METRICS_BY_TYPE[media_key]
     
-    # Fallback to basic metrics
+    # Final fallback to basic metrics
+    logger.debug("Using fallback basic metrics")
     return ["impressions", "reach", "total_interactions"]
 
 def get_page_access_token():
@@ -538,6 +549,18 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
         ])
 
     logger.info(f"📊 Found {len(media_items)} Instagram media items")
+    
+    # Log unique media product types for debugging
+    if media_items:
+        product_types = set()
+        media_types = set()
+        for item in media_items:
+            if 'media_product_type' in item:
+                product_types.add(item['media_product_type'])
+            if 'media_type' in item:
+                media_types.add(item['media_type'])
+        logger.info(f"🔍 Unique media_product_types found: {sorted(product_types)}")
+        logger.info(f"🔍 Unique media_types found: {sorted(media_types)}")
 
     # Filter by date range if specified
     filtered_media = []

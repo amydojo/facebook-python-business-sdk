@@ -58,22 +58,23 @@ logger = logging.getLogger(__name__)
 
 # Valid Ads Insights fields based on official Meta Marketing API docs
 # https://developers.facebook.com/docs/marketing-api/reference/ads-insights/
+# NOTE: 'status' is not valid for insights fields - removed to prevent 400 errors
 VALID_INSIGHT_FIELDS = {
     "campaign": [
-        "campaign_id", "campaign_name", "objective", "status", "budget_rebalance_flag",
+        "campaign_id", "campaign_name", "objective", "budget_rebalance_flag",
         "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm", "cpp",
         "unique_clicks", "unique_link_clicks_ctr", "cost_per_unique_click", "social_spend",
         "date_start", "date_stop", "account_id", "account_name"
     ],
     "adset": [
-        "adset_id", "adset_name", "campaign_id", "campaign_name", "status", "objective",
+        "adset_id", "adset_name", "campaign_id", "campaign_name", "objective",
         "optimization_goal", "billing_event", "bid_amount", "budget_remaining", "daily_budget",
         "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
         "date_start", "date_stop", "account_id"
     ],
     "ad": [
-        "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name", 
-        "status", "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
+        "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
+        "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
         "unique_clicks", "unique_link_clicks_ctr", "cost_per_unique_click",
         "date_start", "date_stop", "account_id"
         # NOTE: creative fields cannot be included in insights - must fetch separately

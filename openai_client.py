@@ -397,3 +397,61 @@ def optimize_audience_targeting(current_audience, performance_data, goal="conver
     except Exception as e:
         logger.error(f"Error optimizing audience targeting: {e}")
         return "Unable to generate targeting recommendations at this time."
+import os
+import logging
+from typing import Optional, Dict, Any
+
+try:
+    import openai
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"OpenAI library not available: {e}")
+    openai = None
+    OpenAI = None
+    OPENAI_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+class OpenAIClient:
+    """OpenAI client wrapper for the application"""
+    
+    def __init__(self):
+        self.client = None
+        self._initialized = False
+        
+        if OPENAI_AVAILABLE:
+            try:
+                api_key = os.getenv("OPENAI_API_KEY")
+                if api_key:
+                    self.client = OpenAI(api_key=api_key)
+                    self._initialized = True
+                    logger.info("✅ OpenAI client initialized")
+                else:
+                    logger.warning("⚠️ OPENAI_API_KEY not found")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize OpenAI client: {e}")
+    
+    def is_initialized(self) -> bool:
+        """Check if OpenAI client is properly initialized"""
+        return self._initialized and self.client is not None
+    
+    def generate_completion(self, prompt: str, model: str = "gpt-3.5-turbo", **kwargs) -> Optional[str]:
+        """Generate text completion using OpenAI"""
+        if not self.is_initialized():
+            logger.error("OpenAI client not initialized")
+            return None
+            
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                **kwargs
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"OpenAI completion failed: {e}")
+            return None
+
+# Global client instance
+openai_client = OpenAIClient()

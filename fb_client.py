@@ -22,7 +22,7 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
-def validate_credentials():
+def validate_environment_vars():
     """
     Check that all required environment variables and tokens for Meta and IG are present.
     Raises RuntimeError if any required variable is missing.
@@ -144,6 +144,9 @@ def validate_credentials():
         bool: True if credentials are valid and account is accessible
     """
     try:
+        # First check environment variables
+        validate_environment_vars()
+        
         # Check if client is initialized
         if not fb_client.is_initialized():
             logger.error("Facebook client not initialized")

@@ -230,20 +230,29 @@ def safe_api_call(
             # Cache the result
             if use_cache and parsed_result is not None:
                 # Convert result to dict if it's a Facebook SDK object
-                if hasattr(parsed_result, 'export_all_data'):
-                    data_to_cache = [item.export_all_data() for item in parsed_result]
-                elif hasattr(parsed_result, '__iter__') and not isinstance(parsed_result, (str, dict)):
-                    try:
-                        data_to_cache = [
-                            item.export_all_data() if hasattr(item, 'export_all_data') else item
-                            for item in parsed_result
-                        ]
-                    except:
+                try:
+                    if hasattr(parsed_result, 'export_all_data'):
+                        # Single SDK object
+                        data_to_cache = parsed_result.export_all_data()
+                    elif hasattr(parsed_result, '__iter__') and not isinstance(parsed_result, (str, dict)):
+                        # Iterable of SDK objects
+                        data_to_cache = []
+                        for item in parsed_result:
+                            if hasattr(item, 'export_all_data'):
+                                data_to_cache.append(item.export_all_data())
+                            elif isinstance(item, (dict, str, int, float, bool, type(None))):
+                                data_to_cache.append(item)
+                            else:
+                                logger.warning(f"Cannot serialize item type {type(item)}, converting to string")
+                                data_to_cache.append(str(item))
+                    else:
+                        # Already serializable
                         data_to_cache = parsed_result
-                else:
-                    data_to_cache = parsed_result
-
-                set_cached_data(cache_key, data_to_cache, cache_ttl_hours)
+                        
+                    set_cached_data(cache_key, data_to_cache, cache_ttl_hours)
+                except Exception as cache_error:
+                    logger.warning(f"Failed to cache data: {cache_error}")
+                    # Continue without caching
 
             return parsed_result
 
@@ -506,59 +515,7 @@ def validate_env_vars(vars_list: List[str]) -> Tuple[bool, List[str]]:
     missing = [v for v in vars_list if not os.getenv(v)]
     return (len(missing) == 0, missing)
 
-def safe_api_call(api_func, cache_key: str, params: Dict, use_cache: bool = True, cache_ttl_hours: int = 1) -> Any:
-    """
-    Safe API call wrapper with caching and error handling.
-    
-    Args:
-        api_func: Function to call (should return requests.Response or SDK object)
-        cache_key: Unique cache identifier
-        params: Parameters for the API call
-        use_cache: Whether to use caching
-        cache_ttl_hours: Cache TTL in hours
-    
-    Returns:
-        Parsed API response data or None on error
-    """
-    global API_CALL_COUNT
-    
-    try:
-        # Execute the API function
-        result = api_func()
-        API_CALL_COUNT += 1
-        
-        # Handle different response types
-        if hasattr(result, 'json'):
-            # HTTP Response object
-            if result.status_code == 200:
-                return result.json()
-            else:
-                logger.error(f"API call failed with status {result.status_code}: {result.text}")
-                return None
-        elif hasattr(result, '__iter__'):
-            # SDK iterator/list - convert to list of dicts
-            data_list = []
-            for item in result:
-                if hasattr(item, 'export_all_data'):
-                    data_list.append(item.export_all_data())
-                elif isinstance(item, dict):
-                    data_list.append(item)
-                else:
-                    logger.warning(f"Unexpected item type in iterator: {type(item)}")
-            return data_list
-        elif hasattr(result, 'export_all_data'):
-            # Single SDK object
-            return result.export_all_data()
-        elif isinstance(result, (dict, list)):
-            # Already a dict/list
-            return result
-        else:
-            logger.warning(f"Unexpected result type: {type(result)}")
-            return result
-            
-    except Exception as e:
-        logger.error(f"API call failed for {cache_key}: {e}")
-        return None
+# Removed duplicate safe_api_call function - using the main one above
 
 def sdk_call_with_backoff(func, *args, max_retries=3, backoff_factor=2, **kwargs):
     """
