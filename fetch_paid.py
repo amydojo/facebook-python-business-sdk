@@ -1,20 +1,40 @@
 """
-Optimized Facebook Ads API integration with corrected insights fields and creative fetching.
-Official docs: https://developers.facebook.com/docs/marketing-api/insights/
+Enhanced fetch paid advertising data from Facebook Marketing API.
+Uses facebook_business SDK for robust, paginated insights retrieval.
+
+Official docs:
+- Ads Insights API: https://developers.facebook.com/docs/marketing-api/insights/
+- Batch Requests: https://developers.facebook.com/docs/marketing-api/best-practices/
+- Error Handling: https://developers.facebook.com/docs/marketing-api/error-handling/
+
+Updated with enhanced error handling, batch processing, and metric optimization
 """
+
+# Valid ad insight fields to prevent 400 errors
+VALID_AD_INSIGHT_FIELDS = {
+    "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
+    "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
+    "unique_clicks", "unique_link_clicks", "cost_per_unique_click", 
+    "date_start", "date_stop", "actions", "action_values", "conversions",
+    "conversion_values", "cost_per_action_type", "video_30_sec_watched_actions",
+    "video_p25_watched_actions", "video_p50_watched_actions", "video_p75_watched_actions",
+    "video_p100_watched_actions", "video_play_actions", "outbound_clicks",
+    "unique_outbound_clicks", "inline_link_clicks", "unique_inline_link_clicks"
+}
 import os
 import requests
 import pandas as pd
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from config import config
+import json
 
 # Import optimized API helpers
-from api_helpers import safe_api_call, batch_facebook_requests, get_api_stats
+from api_helpers import safe_api_call, batch_facebook_requests, get_api_stats, sdk_call_with_backoff
 
 # Import fb_client for API access
-from fb_client import fb_client
+from fb_client import fb_client, validate_credentials
 
 # Facebook Business SDK imports
 try:
@@ -22,6 +42,7 @@ try:
     from facebook_business.adobjects.ad import Ad
     from facebook_business.adobjects.adcreative import AdCreative
     from facebook_business.adobjects.adaccount import AdAccount
+    from facebook_business.api import FacebookRequestError
     CREATIVE_SDK_AVAILABLE = True
 except ImportError as e:
     logging.warning(f"Creative SDK imports not available: {e}")
@@ -417,6 +438,226 @@ def get_campaign_performance_summary(
     except Exception as e:
         logger.error(f"❌ Error generating performance summary: {e}", exc_info=True)
         return {'api_stats': get_api_stats()}
+
+def fetch_creative_for_ad(ad_id: str) -> List[Dict]:
+    """
+    Fetch creative details for a specific ad ID.
+
+    Args:
+        ad_id: Ad ID to fetch creative for
+
+    Returns:
+        List of creative dictionaries
+    """
+    try:
+        ad = Ad(ad_id)
+        creatives = sdk_call_with_backoff(
+            ad.get_ad_creatives,
+            fields=[
+                "id", "name", "body", "title", "image_url", 
+                "thumbnail_url", "object_url", "call_to_action_type"
+            ]
+        )
+
+        result = []
+        for creative in creatives or []:
+            try:
+                if hasattr(creative, 'export_all_data'):
+                    result.append(creative.export_all_data())
+                elif isinstance(creative, dict):
+                    result.append(creative)
+                else:
+                    logger.debug(f"Skipping unexpected creative type: {type(creative)}")
+            except Exception as e:
+                logger.warning(f"Failed to export creative data for ad {ad_id}: {e}")
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
+        return []
+    
+def fetch_ad_insights_fields(account_id: str, level: str, fields: List[str], 
+                                date_preset: Optional[str] = None, 
+                                since: Optional[str] = None, 
+                                until: Optional[str] = None,
+                                params_extra: Optional[Dict[str, Any]] = None) -> List[Dict]:
+    """
+    Fetch ad insights using facebook_business SDK with enhanced error handling.
+
+    Args:
+        account_id: Ad account ID
+        level: 'campaign', 'adset', or 'ad'
+        fields: List of insight fields to fetch
+        date_preset: Preset like 'last_7d', 'yesterday'
+        since: Start date in YYYY-MM-DD format
+        until: End date in YYYY-MM-DD format
+        params_extra: Additional parameters
+
+    Returns:
+        List of insight records as dictionaries
+    """
+    if not validate_credentials():
+        logger.error("❌ Invalid credentials for paid insights")
+        return []
+
+    # Filter out invalid fields to prevent 400 errors
+    filtered_fields = [f for f in fields if f in VALID_AD_INSIGHT_FIELDS]
+    invalid_fields = set(fields) - set(filtered_fields)
+
+    if invalid_fields:
+        logger.warning(f"⚠️ Removed invalid insight fields: {invalid_fields}")
+
+    if not filtered_fields:
+        logger.error("❌ No valid insight fields provided")
+        return []
+
+    # Ensure account_id has proper prefix
+    account_id = account_id if account_id.startswith("act_") else f"act_{account_id}"
+
+    try:
+        account = AdAccount(account_id)
+
+        # Build insight parameters
+        insight_params = {
+            "level": level,
+            "fields": ",".join(filtered_fields)
+        }
+
+        # Add date range
+        if date_preset:
+            insight_params["date_preset"] = date_preset
+        elif since and until:
+            insight_params["time_range"] = json.dumps({
+                "since": since,
+                "until": until
+            })
+
+        # Add extra parameters
+        if params_extra:
+            insight_params.update(params_extra)
+
+        logger.info(f"🎯 Fetching {level} insights for account {account_id}")
+        logger.debug(f"📋 Insight parameters: {insight_params}")
+
+        # Make SDK call with retry logic
+        insights = sdk_call_with_backoff(
+            account.get_insights,
+            params=insight_params
+        )
+
+        if not insights:
+            logger.warning(f"⚠️ No insights returned for account {account_id}")
+            return []
+
+        # Convert SDK objects to dictionaries - handle different response types
+        results = []
+        for insight in insights:
+            try:
+                if hasattr(insight, 'export_all_data'):
+                    data = insight.export_all_data()
+                    results.append(data)
+                elif isinstance(insight, dict):
+                    results.append(insight)
+                else:
+                    logger.debug(f"⚠️ Skipping unexpected insight type: {type(insight)}")
+
+            except Exception as e:
+                logger.warning(f"❌ Error exporting insight data: {e}")
+                continue
+
+        logger.info(f"✅ Successfully fetched {len(results)} {level} insight records")
+        return results
+
+    except FacebookRequestError as e:
+        error_code = e.api_error_code()
+        error_message = e.api_error_message()
+        logger.error(f"❌ Facebook API error (code {error_code}): {error_message}")
+
+        # Handle specific error cases
+        if error_code == 17:  # User request limit reached
+            logger.warning("⏳ Rate limit reached, consider implementing backoff")
+        elif error_code == 190:  # Access token issues
+            logger.error("🔑 Access token error - check token validity")
+        elif error_code == 100:  # Invalid parameter
+            logger.error(f"📋 Invalid parameters: {insight_params}")
+
+        return []
+
+    except Exception as e:
+        logger.error(f"❌ Unexpected error fetching {level} insights: {e}", exc_info=True)
+        return []
+    
+def compute_paid_kpis(df: pd.DataFrame) -> Dict:
+    """
+    Compute key performance indicators (KPIs) from a DataFrame of paid ad insights.
+    Args:
+        df: DataFrame containing ad insights data.
+
+    Returns:
+        A dictionary containing computed KPIs.
+    """
+
+    # Initialize default values for KPIs
+    total_spend = 0
+    total_impressions = 0
+    total_clicks = 0
+    total_reach = 0
+    total_conversions = 0
+
+    if df.empty:
+        return {
+            'total_spend': total_spend,
+            'total_impressions': total_impressions,
+            'total_clicks': total_clicks,
+            'total_reach': total_reach,
+            'total_conversions': total_conversions
+        }
+
+    # Aggregate metrics, handling potential missing columns and data types
+    try:
+        total_spend = df['spend'].astype(float).sum() if 'spend' in df else 0
+        total_impressions = df['impressions'].astype(int).sum() if 'impressions' in df else 0
+        total_clicks = df['clicks'].astype(int).sum() if 'clicks' in df else 0
+        total_reach = df['reach'].astype(int).sum() if 'reach' in df else 0
+        total_conversions = df['conversions'].astype(int).sum() if 'conversions' in df else 0
+    except KeyError as e:
+        logger.error(f"Missing column in DataFrame: {e}")
+        return {
+            'total_spend': 0,
+            'total_impressions': 0,
+            'total_clicks': 0,
+            'total_reach': 0,
+            'total_conversions': 0
+        }
+    except ValueError as e:
+        logger.error(f"Error converting column to numeric type: {e}")
+        return {
+            'total_spend': 0,
+            'total_impressions': 0,
+            'total_clicks': 0,
+            'total_reach': 0,
+            'total_conversions': 0
+        }
+
+    # Compute additional metrics
+    ctr = (total_clicks / total_impressions) * 100 if total_impressions > 0 else 0
+    cpc = total_spend / total_clicks if total_clicks > 0 else 0
+    cpm = (total_spend / total_impressions) * 1000 if total_impressions > 0 else 0
+
+    kpis = {
+        'total_spend': round(total_spend, 2),
+        'total_impressions': total_impressions,
+        'total_clicks': total_clicks,
+        'total_reach': total_reach,
+        'total_conversions': total_conversions,
+        'ctr': round(ctr, 2),
+        'cpc': round(cpc, 2),
+        'cpm': round(cpm, 2)
+    }
+
+    logger.info(f"Computed KPIs: {kpis}")
+    return kpis
 
 if __name__ == "__main__":
     # Test corrected paid insights

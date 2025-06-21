@@ -49,7 +49,15 @@ FALLBACK_PAGE_METRICS = [
     "page_fan_removes"
 ]
 
-# Updated Instagram metrics for 2025 - removing deprecated metrics
+# Updated Instagram metrics for 2025 - curated by media type to avoid invalid field errors
+METRICS_BY_TYPE = {
+    "REELS": ["plays", "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", "clips_replays_count", "ig_reels_aggregated_all_plays_count", "views", "likes", "comments", "shares", "saved", "profile_visits", "follows"],
+    "VIDEO": ["video_views", "total_interactions", "likes", "comments", "shares", "saved", "profile_visits", "follows"],
+    "IMAGE": ["impressions", "reach", "total_interactions", "likes", "comments", "shares", "saved", "profile_visits", "follows"],
+    "CAROUSEL_ALBUM": ["impressions", "reach", "total_interactions", "likes", "comments", "shares", "saved", "profile_visits", "follows"]
+}
+
+# Legacy fallback for compatibility
 FALLBACK_IG_METRICS = {
     # Core engagement metrics (most reliable)
     "reach": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
@@ -73,6 +81,28 @@ FALLBACK_IG_METRICS = {
     "email_contacts": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
     "phone_call_clicks": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
 }
+
+def get_valid_ig_metrics_for_media(media_type: str, media_product_type: str) -> List[str]:
+    """
+    Get curated list of valid metrics for specific media type to avoid API errors.
+    
+    Args:
+        media_type: IMAGE, VIDEO, CAROUSEL_ALBUM
+        media_product_type: REELS, FEED, etc.
+    
+    Returns:
+        List of valid metric names for this media type
+    """
+    # Prioritize product type (REELS) over generic media type
+    if media_product_type and media_product_type.upper() == "REELS":
+        return METRICS_BY_TYPE.get("REELS", [])
+    
+    if media_type:
+        media_key = media_type.upper()
+        return METRICS_BY_TYPE.get(media_key, [])
+    
+    # Fallback to basic metrics
+    return ["impressions", "reach", "total_interactions"]
 
 def get_page_access_token():
     """
@@ -274,58 +304,21 @@ def choose_metrics_for_media(media: Dict) -> List[str]:
         # Build prioritized metric list based on metadata
         chosen = []
 
-        # Core engagement metrics (highest priority)
-        for metric in ["total_interactions", "reach", "comments", "shares", "saved"]:
+        # Get curated metrics for this media type
+        curated = get_valid_ig_metrics_for_media(media_type, product_type)
+        
+        # Only include metrics that are both curated and supported by metadata
+        for metric in curated:
             if metric in supported:
-                chosen.append(metric)
-
-        # Video/Reels specific metrics
-        if "REEL" in product_type:
-            reel_metrics = [
-                "ig_reels_avg_watch_time", "ig_reels_video_view_total_time", 
-                "clips_replays_count", "ig_reels_aggregated_all_plays_count",
-                "profile_visits", "follows", "navigation"
-            ]
-            for metric in reel_metrics:
-                if metric in supported and metric not in chosen:
-                    chosen.append(metric)
-        elif media_type == "VIDEO":
-            video_metrics = ["video_views", "profile_visits", "follows", "navigation"]
-            for metric in video_metrics:
-                if metric in supported and metric not in chosen:
-                    chosen.append(metric)
-
-        # Additional engagement metrics
-        additional_metrics = ["website_clicks", "email_contacts", "phone_call_clicks"]
-        for metric in additional_metrics:
-            if metric in supported and metric not in chosen:
                 chosen.append(metric)
 
         logger.info(f"🎯 Chosen metrics for media {media_id} ({media_type}/{product_type}): {chosen}")
         return chosen
 
-    # Fallback based on media type when metadata unavailable
-    media_key = product_type if product_type == "REEL" else media_type
-    fallback = []
-
-    for metric, supported_types in FALLBACK_IG_METRICS.items():
-        if media_key in supported_types or media_type in supported_types:
-            fallback.append(metric)
-
-    # Prioritize core metrics
-    priority_order = ["reach", "total_interactions", "comments", "shares", "saved", "profile_visits"]
-    final_fallback = []
-
-    for metric in priority_order:
-        if metric in fallback:
-            final_fallback.append(metric)
-
-    for metric in fallback:
-        if metric not in final_fallback:
-            final_fallback.append(metric)
-
-    logger.info(f"📋 No metadata for media {media_id}, using fallback metrics: {final_fallback}")
-    return final_fallback
+    # Use curated metrics when metadata unavailable
+    curated = get_valid_ig_metrics_for_media(media_type, product_type)
+    logger.info(f"📋 No metadata for media {media_id}, using curated metrics: {curated}")
+    return curated
 
 def fetch_insights_for_media(media: Dict) -> List[Dict]:
     """
@@ -354,90 +347,63 @@ def fetch_insights_for_media(media: Dict) -> List[Dict]:
         logger.warning(f"No metrics available for media {media_id}")
         return records
 
-    # Iterative removal approach for unsupported metrics with safe API calls
-    to_try = metrics.copy()
+    # Use curated metrics directly to avoid trial-and-error loops
+    metric_str = ",".join(metrics)
 
-    while to_try:
-        metric_str = ",".join(to_try)
+    def api_call():
+        url = f"{GRAPH_API_BASE}/{media_id}/insights"
+        params = {"metric": metric_str, "access_token": token}
+        resp = requests.get(url, params=params, timeout=15)
+        return resp
 
-        def api_call():
-            url = f"{GRAPH_API_BASE}/{media_id}/insights"
-            params = {"metric": metric_str, "access_token": token}
-            resp = requests.get(url, params=params, timeout=15)
-            return resp
+    # Use safe API call wrapper
+    result = safe_api_call(
+        api_call,
+        f"media_insights_{media_id}",
+        {"metrics": metric_str},
+        cache_ttl_hours=6,  # Cache media insights for 6 hours
+        use_cache=True
+    )
 
-        # Use safe API call wrapper
-        resp = safe_api_call(
-            api_call,
-            f"media_insights_{media_id}",
-            {"metrics": metric_str},
-            cache_ttl_hours=6,  # Cache media insights for 6 hours
-            use_cache=True
-        )
+    if result is None:
+        logger.warning(f"❌ Rate limited or failed for media {media_id}")
+        return records
 
-        if resp is None:
-            logger.warning(f"❌ Rate limited or failed for media {media_id}")
-            break
-
-        try:
-            body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-        except:
-            body = {}
-
-        if resp.status_code == 200 and "data" in body:
-            # Success - extract metrics
-            for metric_obj in body["data"]:
-                metric_name = metric_obj.get("name")
-                values = metric_obj.get("values", [])
-
-                if values:
-                    # Use the most recent value
-                    value = values[-1].get("value", 0)
-
-                    records.append({
-                        "media_id": media_id,
-                        "timestamp": timestamp,
-                        "caption": caption[:200] + "..." if len(caption) > 200 else caption,
-                        "media_url": media_url,
-                        "permalink": permalink,
-                        "thumbnail_url": thumbnail_url,
-                        "media_type": media_type,
-                        "media_product_type": media_product_type,
-                        "metric": metric_name,
-                        "value": value
-                    })
-
-            logger.info(f"✅ Fetched {len(records)} metric records for media {media_id}")
-            break
-
-        elif resp.status_code == 400 and "error" in body:
-            # Handle unsupported metric errors
-            error_msg = body["error"].get("message", "")
-            logger.warning(f"📱 Media {media_id} insights error: {error_msg}")
-
-            # Try to identify problematic metric from error message
-            removed_metric = None
-            for metric in to_try:
-                if metric.lower() in error_msg.lower():
-                    removed_metric = metric
-                    break
-
-            if removed_metric:
-                to_try.remove(removed_metric)
-                logger.info(f"🔄 Removed unsupported metric '{removed_metric}', retrying with {to_try}")
-                continue
-            elif len(to_try) > 1:
-                # Remove one metric and retry
-                removed_metric = to_try.pop()
-                logger.info(f"🔍 Couldn't identify problematic metric, removing '{removed_metric}' and retrying")
-                continue
-            else:
-                logger.warning(f"❌ Last metric '{to_try[0]}' unsupported for media {media_id}")
-                break
+    # Handle response - result can be dict with "data" or list directly
+    items = []
+    if isinstance(result, dict):
+        if "data" in result and isinstance(result["data"], list):
+            items = result["data"]
         else:
-            logger.warning(f"❌ Insights fetch error for media {media_id}: status {resp.status_code}, {body}")
-            break
+            logger.debug(f"Media {media_id}: Unexpected result shape (dict without 'data'): {result}")
+    elif isinstance(result, list):
+        items = result
+    else:
+        logger.debug(f"Media {media_id}: Unexpected result type: {type(result)}")
 
+    # Process insight items
+    for metric_obj in items:
+        metric_name = metric_obj.get("name")
+        values = metric_obj.get("values", [])
+
+        if values:
+            # Use the most recent value
+            value = values[-1].get("value", 0) if isinstance(values[-1], dict) else values[-1]
+
+            records.append({
+                "media_id": media_id,
+                "timestamp": timestamp,
+                "caption": caption[:200] + "..." if len(caption) > 200 else caption,
+                "media_url": media_url,
+                "permalink": permalink,
+                "thumbnail_url": thumbnail_url,
+                "media_type": media_type,
+                "media_product_type": media_product_type,
+                "metric": metric_name,
+                "value": value
+            })
+
+    logger.info(f"✅ Fetched {len(records)} metric records for media {media_id}")
     return records
 
 def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until: Optional[str] = None) -> pd.DataFrame:
@@ -472,25 +438,38 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
     media_items = []
 
     try:
-        # Handle pagination
-        while url:
-            logger.info(f"Fetching media list from: {url}")
+        # Use safe API call wrapper for media list
+        def media_api_call():
             resp = requests.get(url, params=params, timeout=15)
-            body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+            return resp
 
-            logger.info(f"Media list API response: status={resp.status_code}")
+        result = safe_api_call(
+            media_api_call,
+            f"ig_media_list_{ig_user_id}",
+            params,
+            cache_ttl_hours=1,
+            use_cache=True
+        )
 
-            if resp.status_code != 200 or "error" in body:
-                logger.error(f"❌ Error fetching IG media list: {body}")
-                break
+        if result is None:
+            logger.error(f"❌ Failed to fetch IG media list for {ig_user_id}")
+            return pd.DataFrame(columns=[
+                'media_id', 'timestamp', 'caption', 'media_url', 'permalink', 
+                'thumbnail_url', 'media_type', 'media_product_type', 'metric', 'value'
+            ])
 
-            data = body.get("data", [])
-            media_items.extend(data)
-
-            # Get next page
-            paging = body.get("paging", {})
-            url = paging.get("next")
-            params = None  # Next URL includes all params
+        # Handle response - result can be dict with "data" or list directly
+        if isinstance(result, dict):
+            if "data" in result and isinstance(result["data"], list):
+                media_items = result["data"]
+            else:
+                logger.debug(f"Unexpected media list result shape: {result}")
+                media_items = []
+        elif isinstance(result, list):
+            media_items = result
+        else:
+            logger.debug(f"Unexpected media list result type: {type(result)}")
+            media_items = []
 
     except Exception as e:
         logger.error(f"❌ Exception fetching IG media list: {e}", exc_info=True)

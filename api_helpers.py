@@ -181,7 +181,7 @@ def safe_api_call(
         max_retries: Maximum retry attempts
 
     Returns:
-        API response data or None if failed
+        Parsed JSON data (dict/list) or None if failed
     """
     global API_CALL_COUNT
 
@@ -210,25 +210,42 @@ def safe_api_call(
             elapsed = time.time() - start_time
             logger.info(f"API call successful in {elapsed:.2f}s")
 
+            # Parse response if it's an HTTP response object
+            parsed_result = result
+            if hasattr(result, 'json') and hasattr(result, 'status_code'):
+                # It's an HTTP response - parse JSON and check status
+                if result.status_code != 200:
+                    try:
+                        error_body = result.json()
+                        error_msg = error_body.get('error', {}).get('message', f'HTTP {result.status_code}')
+                        raise Exception(f"API error: {error_msg}")
+                    except ValueError:
+                        raise Exception(f"HTTP {result.status_code}: {result.text}")
+                
+                try:
+                    parsed_result = result.json()
+                except ValueError:
+                    raise Exception("Invalid JSON response")
+
             # Cache the result
-            if use_cache and result is not None:
+            if use_cache and parsed_result is not None:
                 # Convert result to dict if it's a Facebook SDK object
-                if hasattr(result, 'export_all_data'):
-                    data_to_cache = [item.export_all_data() for item in result]
-                elif hasattr(result, '__iter__') and not isinstance(result, (str, dict)):
+                if hasattr(parsed_result, 'export_all_data'):
+                    data_to_cache = [item.export_all_data() for item in parsed_result]
+                elif hasattr(parsed_result, '__iter__') and not isinstance(parsed_result, (str, dict)):
                     try:
                         data_to_cache = [
                             item.export_all_data() if hasattr(item, 'export_all_data') else item
-                            for item in result
+                            for item in parsed_result
                         ]
                     except:
-                        data_to_cache = result
+                        data_to_cache = parsed_result
                 else:
-                    data_to_cache = result
+                    data_to_cache = parsed_result
 
                 set_cached_data(cache_key, data_to_cache, cache_ttl_hours)
 
-            return result
+            return parsed_result
 
         except Exception as e:
             error_msg = str(e).lower()
