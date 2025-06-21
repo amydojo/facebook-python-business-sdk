@@ -506,6 +506,94 @@ def validate_env_vars(vars_list: List[str]) -> Tuple[bool, List[str]]:
     missing = [v for v in vars_list if not os.getenv(v)]
     return (len(missing) == 0, missing)
 
+def safe_api_call(api_func, cache_key: str, params: Dict, use_cache: bool = True, cache_ttl_hours: int = 1) -> Any:
+    """
+    Safe API call wrapper with caching and error handling.
+    
+    Args:
+        api_func: Function to call (should return requests.Response or SDK object)
+        cache_key: Unique cache identifier
+        params: Parameters for the API call
+        use_cache: Whether to use caching
+        cache_ttl_hours: Cache TTL in hours
+    
+    Returns:
+        Parsed API response data or None on error
+    """
+    global API_CALL_COUNT
+    
+    try:
+        # Execute the API function
+        result = api_func()
+        API_CALL_COUNT += 1
+        
+        # Handle different response types
+        if hasattr(result, 'json'):
+            # HTTP Response object
+            if result.status_code == 200:
+                return result.json()
+            else:
+                logger.error(f"API call failed with status {result.status_code}: {result.text}")
+                return None
+        elif hasattr(result, '__iter__'):
+            # SDK iterator/list - convert to list of dicts
+            data_list = []
+            for item in result:
+                if hasattr(item, 'export_all_data'):
+                    data_list.append(item.export_all_data())
+                elif isinstance(item, dict):
+                    data_list.append(item)
+                else:
+                    logger.warning(f"Unexpected item type in iterator: {type(item)}")
+            return data_list
+        elif hasattr(result, 'export_all_data'):
+            # Single SDK object
+            return result.export_all_data()
+        elif isinstance(result, (dict, list)):
+            # Already a dict/list
+            return result
+        else:
+            logger.warning(f"Unexpected result type: {type(result)}")
+            return result
+            
+    except Exception as e:
+        logger.error(f"API call failed for {cache_key}: {e}")
+        return None
+
+def sdk_call_with_backoff(func, *args, max_retries=3, backoff_factor=2, **kwargs):
+    """
+    Execute Facebook SDK call with exponential backoff retry logic.
+    
+    Args:
+        func: SDK function to call
+        max_retries: Maximum number of retry attempts
+        backoff_factor: Multiplier for wait time between retries
+        
+    Returns:
+        Function result or None on failure
+    """
+    import time
+    
+    attempt = 0
+    wait_time = 1
+    
+    while attempt < max_retries:
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger.warning(f"SDK call attempt {attempt + 1} failed: {e}")
+            
+            # Check if we should retry
+            if attempt < max_retries - 1:
+                time.sleep(wait_time)
+                wait_time *= backoff_factor
+                attempt += 1
+            else:
+                logger.error(f"SDK call failed after {max_retries} attempts")
+                return None
+    
+    return None
+
 def get_api_stats() -> Dict[str, Any]:
     """Get current session API usage statistics."""
     session_duration = (datetime.now() - SESSION_START).total_seconds()

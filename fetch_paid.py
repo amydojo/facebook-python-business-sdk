@@ -89,7 +89,7 @@ def get_account_with_retries() -> Optional[AdAccount]:
 
 def fetch_creative_details(ad_ids: List[str]) -> Dict[str, Dict]:
     """
-    Fetch creative details for multiple ads using separate API calls.
+    Fetch creative details for multiple ads using safe API calls.
 
     Args:
         ad_ids: List of ad IDs to fetch creative details for
@@ -115,27 +115,29 @@ def fetch_creative_details(ad_ids: List[str]) -> Dict[str, Dict]:
                 cache_ttl_hours=24
             )
 
-            if ad_info and 'creative' in ad_info:
-                creative_id = ad_info['creative']['id']
+            if ad_info and isinstance(ad_info, dict) and 'creative' in ad_info:
+                creative_info = ad_info['creative']
+                
+                if isinstance(creative_info, dict) and 'id' in creative_info:
+                    creative_id = creative_info['id']
 
-                # Fetch the actual creative details
-                def get_creative_details():
-                    creative = AdCreative(creative_id)
-                    return creative.api_get(fields=[
-                        'id', 'name', 'body', 'title', 'image_url', 
-                        'thumbnail_url', 'object_url', 'image_hash'
-                    ])
+                    # Fetch the actual creative details
+                    def get_creative_details():
+                        creative = AdCreative(creative_id)
+                        return creative.api_get(fields=[
+                            'id', 'name', 'body', 'title', 'image_url', 
+                            'thumbnail_url', 'object_url', 'image_hash'
+                        ])
 
-                creative_details = safe_api_call(
-                    get_creative_details,
-                    f"creative_{creative_id}",
-                    {},
-                    cache_ttl_hours=24
-                )
+                    creative_details = safe_api_call(
+                        get_creative_details,
+                        f"creative_{creative_id}",
+                        {},
+                        cache_ttl_hours=24
+                    )
 
-                if creative_details:
-                    creative_dict = creative_details.export_all_data() if hasattr(creative_details, 'export_all_data') else creative_details
-                    creative_data[ad_id] = creative_dict
+                    if creative_details and isinstance(creative_details, dict):
+                        creative_data[ad_id] = creative_details
 
         except Exception as e:
             logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
@@ -191,30 +193,16 @@ def safe_fetch_insights(level: str, fields: List[str], params: Dict) -> pd.DataF
         logger.warning("⚠️ No insights data returned")
         return pd.DataFrame()
 
-    # Process results
+    # Process results - insights_data should already be processed by safe_api_call
     all_data = []
     try:
         if isinstance(insights_data, list):
             all_data = insights_data
+        elif isinstance(insights_data, dict):
+            all_data = [insights_data]
         else:
-            page_count = 0
-            while insights_data:
-                page_count += 1
-                logger.info(f"📄 Processing insights page {page_count}")
-
-                for entry in insights_data:
-                    data = entry.export_all_data() if hasattr(entry, 'export_all_data') else entry
-                    all_data.append(data)
-
-                try:
-                    insights_data = safe_api_call(
-                        lambda: insights_data.next_page(),
-                        f"{endpoint}_page_{page_count}",
-                        {},
-                        use_cache=False
-                    )
-                except Exception:
-                    break
+            logger.warning(f"Unexpected insights data type: {type(insights_data)}")
+            return pd.DataFrame()
 
         logger.info(f"✅ Successfully fetched {len(all_data)} {level} insight records")
 
@@ -447,7 +435,7 @@ def get_campaign_performance_summary(
 
 def fetch_creative_for_ad(ad_id: str) -> List[Dict]:
     """
-    Fetch creative details for a specific ad ID.
+    Fetch creative details for a specific ad ID using safe API calls.
 
     Args:
         ad_id: Ad ID to fetch creative for
@@ -456,28 +444,32 @@ def fetch_creative_for_ad(ad_id: str) -> List[Dict]:
         List of creative dictionaries
     """
     try:
-        ad = Ad(ad_id)
-        creatives = sdk_call_with_backoff(
-            ad.get_ad_creatives,
-            fields=[
+        def get_ad_creatives():
+            ad = Ad(ad_id)
+            return ad.get_ad_creatives(fields=[
                 "id", "name", "body", "title", "image_url", 
                 "thumbnail_url", "object_url", "call_to_action_type"
-            ]
+            ])
+
+        creatives_result = safe_api_call(
+            get_ad_creatives,
+            f"ad_creatives_{ad_id}",
+            {},
+            cache_ttl_hours=24
         )
 
-        result = []
-        for creative in creatives or []:
-            try:
-                if hasattr(creative, 'export_all_data'):
-                    result.append(creative.export_all_data())
-                elif isinstance(creative, dict):
-                    result.append(creative)
-                else:
-                    logger.debug(f"Skipping unexpected creative type: {type(creative)}")
-            except Exception as e:
-                logger.warning(f"Failed to export creative data for ad {ad_id}: {e}")
+        if not creatives_result:
+            logger.warning(f"No creatives returned for ad {ad_id}")
+            return []
 
-        return result
+        # Handle different response formats
+        if isinstance(creatives_result, list):
+            return creatives_result
+        elif isinstance(creatives_result, dict):
+            return [creatives_result]
+        else:
+            logger.warning(f"Unexpected creative result format for ad {ad_id}: {type(creatives_result)}")
+            return []
 
     except Exception as e:
         logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
@@ -556,24 +548,27 @@ def fetch_ad_insights_fields(account_id: str, level: str, fields: List[str],
             logger.warning(f"⚠️ No insights returned for account {account_id}")
             return []
 
-        # Convert SDK objects to dictionaries - handle different response types
-        results = []
-        for insight in insights:
-            try:
-                if hasattr(insight, 'export_all_data'):
-                    data = insight.export_all_data()
-                    results.append(data)
-                elif isinstance(insight, dict):
-                    results.append(insight)
-                else:
-                    logger.debug(f"⚠️ Skipping unexpected insight type: {type(insight)}")
+        # Use safe_api_call to handle SDK objects properly
+        def get_insights():
+            return account.get_insights(params=insight_params)
 
-            except Exception as e:
-                logger.warning(f"❌ Error exporting insight data: {e}")
-                continue
+        results = safe_api_call(
+            get_insights,
+            f"insights_{level}_{account_id}",
+            insight_params,
+            cache_ttl_hours=2
+        )
 
-        logger.info(f"✅ Successfully fetched {len(results)} {level} insight records")
-        return results
+        if not results:
+            logger.warning(f"⚠️ No insights returned for account {account_id}")
+            return []
+
+        if isinstance(results, list):
+            logger.info(f"✅ Successfully fetched {len(results)} {level} insight records")
+            return results
+        else:
+            logger.warning(f"Unexpected results format: {type(results)}")
+            return []
 
     except FacebookRequestError as e:
         error_code = e.api_error_code()

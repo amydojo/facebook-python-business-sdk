@@ -136,6 +136,32 @@ class FacebookClient:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+def validate_credentials():
+    """
+    Validate Facebook Business SDK credentials and account access.
+    
+    Returns:
+        bool: True if credentials are valid and account is accessible
+    """
+    try:
+        # Check if client is initialized
+        if not fb_client.is_initialized():
+            logger.error("Facebook client not initialized")
+            return False
+            
+        # Test connection
+        test_result = fb_client.test_connection()
+        if test_result.get("success"):
+            logger.info("✅ Facebook credentials validated successfully")
+            return True
+        else:
+            logger.error(f"❌ Facebook credential validation failed: {test_result.get('error')}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Error validating Facebook credentials: {e}")
+        return False
+
 # Initialize global client instance
 fb_client = FacebookClient()
 

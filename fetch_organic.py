@@ -167,17 +167,25 @@ def get_ig_follower_count(ig_user_id: str) -> Optional[int]:
 
     try:
         logger.info(f"Fetching follower count from: {url}")
-        resp = requests.get(url, params=params, timeout=10)
-        body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+        def follower_api_call():
+            return requests.get(url, params=params, timeout=10)
 
-        logger.info(f"Follower count API response: status={resp.status_code}, body={body}")
+        result = safe_api_call(
+            follower_api_call,
+            f"ig_followers_{ig_user_id}",
+            params,
+            cache_ttl_hours=6,
+            use_cache=True
+        )
 
-        if resp.status_code == 200 and "followers_count" in body:
-            _ig_user_followers = body["followers_count"]
+        logger.info(f"Follower count API response: {result}")
+
+        if result and isinstance(result, dict) and "followers_count" in result:
+            _ig_user_followers = result["followers_count"]
             logger.info(f"✅ Fetched IG follower count: {_ig_user_followers}")
             return _ig_user_followers
         else:
-            logger.warning(f"❌ Failed to fetch follower count: {body}")
+            logger.warning(f"❌ Failed to fetch follower count: {result}")
 
     except Exception as e:
         logger.error(f"Error fetching IG follower count: {e}", exc_info=True)
@@ -217,14 +225,22 @@ def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: s
 
     try:
         logger.info(f"Fetching user insights from: {url} with params: {params}")
-        resp = requests.get(url, params=params, timeout=10)
-        body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+        def user_insights_api_call():
+            return requests.get(url, params=params, timeout=10)
 
-        logger.info(f"User insights API response: status={resp.status_code}, body={body}")
+        result = safe_api_call(
+            user_insights_api_call,
+            f"ig_user_insights_{cache_key}",
+            params,
+            cache_ttl_hours=4,
+            use_cache=True
+        )
 
-        if resp.status_code == 200 and "data" in body:
+        logger.info(f"User insights API response: {result}")
+
+        if result and isinstance(result, dict) and "data" in result:
             insights = {}
-            for metric_obj in body["data"]:
+            for metric_obj in result["data"]:
                 metric_name = metric_obj.get("name")
                 values = metric_obj.get("values", [])
                 if values:
@@ -234,7 +250,7 @@ def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: s
             logger.info(f"✅ Fetched IG user insights: {list(insights.keys())}")
             return insights
         else:
-            logger.warning(f"❌ Failed to fetch user insights: {body}")
+            logger.warning(f"❌ Failed to fetch user insights: {result}")
 
     except Exception as e:
         logger.error(f"Error fetching IG user insights: {e}", exc_info=True)
@@ -263,18 +279,26 @@ def fetch_media_insights_metadata(media_id: str) -> List[str]:
 
     try:
         logger.info(f"Fetching metadata from: {url}")
-        resp = requests.get(url, params={"access_token": token}, timeout=10)
-        body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+        def metadata_api_call():
+            return requests.get(url, params={"access_token": token}, timeout=10)
 
-        logger.info(f"Metadata API response: status={resp.status_code}, body={body}")
+        result = safe_api_call(
+            metadata_api_call,
+            f"ig_metadata_{media_id}",
+            {"access_token": token},
+            cache_ttl_hours=24,
+            use_cache=True
+        )
 
-        if resp.status_code == 200 and "data" in body:
-            metrics = [item.get("name") for item in body["data"] if item.get("name")]
+        logger.info(f"Metadata API response: {result}")
+
+        if result and isinstance(result, dict) and "data" in result:
+            metrics = [item.get("name") for item in result["data"] if item.get("name")]
             logger.info(f"📊 Media {media_id} supports metrics: {metrics}")
             _ig_media_metadata_cache[media_id] = metrics
             return metrics
         else:
-            logger.info(f"⚠️ Metadata fetch not available for media {media_id}: {body}")
+            logger.info(f"⚠️ Metadata fetch not available for media {media_id}: {result}")
 
     except Exception as e:
         logger.debug(f"Metadata fetch failed for media {media_id}: {e}")
@@ -354,16 +378,22 @@ def fetch_insights_for_media(media: Dict) -> List[Dict]:
         params = {"metric": metric_str, "access_token": token}
 
         try:
-            resp = requests.get(url, params=params, timeout=15)
-            
-            # Check for JSON response
-            if resp.headers.get("Content-Type", "").startswith("application/json"):
-                result = resp.json()
-            else:
-                logger.warning(f"Media {media_id}: Non-JSON response")
-                return records
+            def media_insights_api_call():
+                return requests.get(url, params=params, timeout=15)
+
+            result = safe_api_call(
+                media_insights_api_call,
+                f"media_insights_{media_id}_{metric_str[:50]}",
+                params,
+                cache_ttl_hours=1,
+                use_cache=True
+            )
 
             # Check for API error in response
+            if not result:
+                logger.warning(f"Media {media_id}: No result from API call")
+                return records
+                
             if isinstance(result, dict) and result.get("error"):
                 err = result["error"]
                 msg = err.get("message", "")
