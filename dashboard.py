@@ -23,7 +23,18 @@ from fetch_organic import (
     compute_instagram_kpis,
     validate_organic_environment
 )
-from fetch_paid import get_paid_insights
+
+# Import paid insights functions with error handling
+try:
+    from fetch_paid import get_campaign_performance_with_creatives, get_paid_insights
+    PAID_INSIGHTS_AVAILABLE = True
+    logger.info("✅ Paid insights functions imported successfully")
+except ImportError as e:
+    logger.error(f"❌ Failed to import paid insights functions: {e}")
+    get_campaign_performance_with_creatives = None
+    get_paid_insights = None
+    PAID_INSIGHTS_AVAILABLE = False
+
 import openai
 from config import config
 
@@ -484,15 +495,97 @@ def show_paid_campaign_insights():
     """Paid campaign insights section"""
     st.header("💰 Paid Campaign Insights")
 
+    if not PAID_INSIGHTS_AVAILABLE:
+        st.error("❌ Paid insights functionality not available. Please check your fetch_paid.py configuration and ensure all dependencies are installed.")
+        st.info("Required: facebook-business SDK and properly configured fb_client.py")
+        return
+
+    # Sidebar controls for paid insights
+    with st.sidebar:
+        st.subheader("📅 Paid Campaign Settings")
+        
+        date_preset = st.selectbox(
+            "Date Range",
+            options=["yesterday", "last_7d", "last_30d", "this_month", "last_month"],
+            index=1  # Default to last_7d
+        )
+        
+        include_creatives = st.checkbox("Include Creative Previews", value=True)
+
     with st.spinner("Loading paid campaign data..."):
         try:
-            paid_data = get_paid_insights()
+            # Use the correct function with proper parameters
+            paid_data = get_campaign_performance_with_creatives(
+                date_preset=date_preset, 
+                include_creatives=include_creatives
+            )
 
             if paid_data.empty:
-                st.warning("No paid campaign data available. Check your Meta Ads account connection.")
+                st.warning("No paid campaign data available. Check your Meta Ads account connection and ensure AD_ACCOUNT_ID is set.")
                 return
 
-            st.dataframe(paid_data, use_container_width=True)
+            # Display summary metrics
+            if len(paid_data) > 0:
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    total_spend = paid_data['spend'].astype(float).sum()
+                    st.metric("Total Spend", f"${total_spend:,.2f}")
+                
+                with col2:
+                    total_impressions = paid_data['impressions'].astype(int).sum()
+                    st.metric("Total Impressions", f"{total_impressions:,}")
+                
+                with col3:
+                    total_clicks = paid_data['clicks'].astype(int).sum()
+                    st.metric("Total Clicks", f"{total_clicks:,}")
+                
+                with col4:
+                    avg_ctr = (total_clicks / total_impressions * 100) if total_impressions > 0 else 0
+                    st.metric("Average CTR", f"{avg_ctr:.2f}%")
+
+            # Show campaign data table
+            st.subheader("📊 Campaign Performance Data")
+            
+            # Format numeric columns for better display
+            display_df = paid_data.copy()
+            if 'spend' in display_df.columns:
+                display_df['spend'] = display_df['spend'].astype(float).round(2)
+            if 'ctr' in display_df.columns:
+                display_df['ctr'] = display_df['ctr'].astype(float).round(3)
+            if 'cpc' in display_df.columns:
+                display_df['cpc'] = display_df['cpc'].astype(float).round(3)
+            
+            st.dataframe(display_df, use_container_width=True)
+
+            # Show creative previews if available
+            if include_creatives and 'creative_image_url' in paid_data.columns:
+                st.subheader("🎨 Creative Previews")
+                
+                # Filter rows with creative URLs
+                creative_rows = paid_data[paid_data['creative_image_url'].notna()].head(5)
+                
+                if not creative_rows.empty:
+                    for _, row in creative_rows.iterrows():
+                        with st.expander(f"Creative: {row.get('creative_name', 'Unnamed')}"):
+                            col1, col2 = st.columns([1, 2])
+                            
+                            with col1:
+                                if pd.notna(row.get('creative_image_url')):
+                                    try:
+                                        st.image(row['creative_image_url'], caption="Creative Preview")
+                                    except:
+                                        st.text("Preview not available")
+                            
+                            with col2:
+                                st.write(f"**Campaign:** {row.get('campaign_name', 'N/A')}")
+                                st.write(f"**Ad:** {row.get('ad_name', 'N/A')}")
+                                if pd.notna(row.get('creative_body')):
+                                    st.write(f"**Body:** {row.get('creative_body')}")
+                                if pd.notna(row.get('creative_title')):
+                                    st.write(f"**Title:** {row.get('creative_title')}")
+                else:
+                    st.info("No creative previews available for current campaigns.")
 
         except Exception as e:
             st.error(f"Error loading paid campaign data: {str(e)}")

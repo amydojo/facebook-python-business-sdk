@@ -1,4 +1,7 @@
 """
+The code has been modified to improve the get_paid_insights function with better error handling and to add a backward compatibility alias.
+"""
+"""
 Facebook Ads API integration for fetching paid campaign performance data.
 Official docs: https://developers.facebook.com/docs/marketing-api/insights/
 """
@@ -235,7 +238,7 @@ def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
                         record[col] = float(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0.0
                     else:
                         record[col] = value
-                
+
                 # Copy date fields as-is
                 for col in ['date_start', 'date_stop']:
                     record[col] = row.get(col, None)
@@ -267,7 +270,7 @@ def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
                     record[col] = float(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0.0
                 else:
                     record[col] = value
-            
+
             # Copy date fields as-is
             for col in ['date_start', 'date_stop']:
                 record[col] = row.get(col, None)
@@ -303,6 +306,49 @@ def get_campaign_performance_with_creatives(date_preset: str = "last_7d", includ
         return enrich_with_creatives(df_campaigns)
 
     return df_campaigns
+
+def get_paid_insights(date_preset: str = "last_7d", since: str = None, until: str = None, include_creatives: bool = True) -> pd.DataFrame:
+    """
+    Main function to get paid campaign insights - wrapper around get_campaign_performance_with_creatives.
+
+    Args:
+        date_preset: Date range preset ('yesterday', 'last_7d', 'last_30d', etc.)
+        since: Start date in YYYY-MM-DD format (optional)
+        until: End date in YYYY-MM-DD format (optional)
+        include_creatives: Whether to include creative preview data
+
+    Returns:
+        DataFrame with paid campaign performance and creative data
+    """
+    try:
+        logger.info(f"📊 Fetching paid insights for {date_preset or f'{since} to {until}'}")
+
+        if since and until:
+            # Use custom date range - basic insights only
+            return fetch_ad_insights(
+                level="campaign",
+                fields=[
+                    "campaign_id", "campaign_name", "impressions", "clicks", "spend", 
+                    "reach", "frequency", "ctr", "cpc", "cpm", "date_start", "date_stop"
+                ],
+                since=since,
+                until=until
+            )
+        else:
+            # Use date preset with optional creatives
+            return get_campaign_performance_with_creatives(
+                date_preset=date_preset, 
+                include_creatives=include_creatives
+            )
+
+    except Exception as e:
+        logger.error(f"❌ Error fetching paid insights: {e}", exc_info=True)
+        return pd.DataFrame()
+
+# Backward compatibility aliases
+def get_campaign_insights(*args, **kwargs):
+    """Alias for get_paid_insights"""
+    return get_paid_insights(*args, **kwargs)
 
 def get_campaign_performance_summary(date_preset: str = "last_7d", campaign_ids: List[str] = None) -> Dict:
     """
@@ -418,18 +464,18 @@ if __name__ == "__main__":
     # os.environ["META_ACCESS_TOKEN"] = "<META_ACCESS_TOKEN>"
     # os.environ["META_APP_ID"] = "<META_APP_ID>"
     # os.environ["META_APP_SECRET"] = "<META_APP_SECRET>"
-    
+
     # Test fb_client
     print("fb_client.account:", getattr(fb_client, "account", None))
     print("fb_client initialized:", fb_client.is_initialized())
-    
+
     # Test paid fetch
     logger.info("🧪 Testing paid campaign fetch with creative previews...")
     try:
         df_paid = get_campaign_performance_with_creatives(date_preset="last_7d")
         print("Paid head:", df_paid.head() if not df_paid.empty else "Empty DataFrame")
         print("Paid cols:", df_paid.columns.tolist())
-        
+
         if not df_paid.empty:
             # Check for preview URLs
             has_images = df_paid['creative_image_url'].notna().sum() if 'creative_image_url' in df_paid.columns else 0
