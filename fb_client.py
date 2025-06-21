@@ -1,3 +1,4 @@
+
 """
 Facebook Business SDK client initialization.
 Official docs: https://developers.facebook.com/docs/business-sdk/getting-started/
@@ -6,7 +7,6 @@ import os
 import logging
 
 # Official Facebook Business SDK imports
-# Official docs: https://developers.facebook.com/docs/business-sdk/
 try:
     from facebook_business.api import FacebookAdsApi
     from facebook_business.adobjects.adaccount import AdAccount
@@ -60,23 +60,32 @@ class FacebookClient:
             return
 
         # Initialize API with optional app secret proof for enhanced security
-        if app_id and app_secret:
-            self.api = FacebookAdsApi.init(
-                app_id=app_id,
-                app_secret=app_secret,
-                access_token=access_token
-            )
-            logger.info("✅ Facebook API initialized with app secret proof")
-        else:
-            self.api = FacebookAdsApi.init(access_token=access_token)
-            logger.info("✅ Facebook API initialized with access token only")
+        try:
+            if app_id and app_secret:
+                self.api = FacebookAdsApi.init(
+                    app_id=app_id,
+                    app_secret=app_secret,
+                    access_token=access_token,
+                    api_version="v23.0"
+                )
+                logger.info("✅ Facebook API initialized with app secret proof")
+            else:
+                self.api = FacebookAdsApi.init(
+                    access_token=access_token,
+                    api_version="v23.0"
+                )
+                logger.info("✅ Facebook API initialized with access token only")
 
-        # Initialize ad account
-        account_id = f"act_{ad_account_id}" if not ad_account_id.startswith("act_") else ad_account_id
-        self.account = AdAccount(account_id)
+            # Initialize ad account
+            account_id = f"act_{ad_account_id}" if not ad_account_id.startswith("act_") else ad_account_id
+            self.account = AdAccount(account_id)
 
-        self._initialized = True
-        logger.info(f"✅ Facebook SDK initialized for Ad Account: {account_id}")
+            self._initialized = True
+            logger.info(f"✅ Facebook SDK initialized for Ad Account: {account_id}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Facebook API: {e}")
+            self._initialized = False
 
     def is_initialized(self):
         """Check if client is properly initialized."""
@@ -111,4 +120,3 @@ if __name__ == "__main__":
     else:
         print("fb_client not initialized - check environment variables")
     print(f"SDK available: {SDK_AVAILABLE}")
-    print(f"fb_client.account: {getattr(fb_client, 'account', None)}")

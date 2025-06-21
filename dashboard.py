@@ -54,8 +54,9 @@ except ImportError as e:
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if openai_api_key and OPENAI_AVAILABLE:
     try:
+        # Set the API key for OpenAI
         openai.api_key = openai_api_key
-        logger.info("OpenAI API key configured")
+        logger.info("✅ OpenAI API key configured")
     except Exception as e:
         logger.error(f"Failed to configure OpenAI: {e}")
         OPENAI_AVAILABLE = False
@@ -649,16 +650,19 @@ def show_paid_campaign_insights():
                             col1, col2, col3 = st.columns([1, 2, 1])
 
                             with col1:
-                                if pd.notna(row.get('creative_image_url')):
-                                    try:
-                                        st.image(row['creative_image_url'], caption="Creative Preview", use_column_width=True)
-                                    except Exception as e:
-                                        st.error(f"Could not load image: {str(e)}")
-                                        if pd.notna(row.get('creative_thumbnail_url')):
-                                            try:
-                                                st.image(row['creative_thumbnail_url'], caption="Thumbnail", use_column_width=True)
-                                            except:
-                                                st.text("No preview available")
+                                # Try to display creative image
+                                image_displayed = False
+                                for url_field in ['creative_image_url', 'creative_thumbnail_url']:
+                                    if pd.notna(row.get(url_field)) and not image_displayed:
+                                        try:
+                                            st.image(row[url_field], caption="Creative Preview", use_column_width=True)
+                                            image_displayed = True
+                                        except Exception as e:
+                                            logger.debug(f"Could not load {url_field}: {e}")
+                                            continue
+                                
+                                if not image_displayed:
+                                    st.info("📷 No image preview available")
 
                             with col2:
                                 st.write(f"**Campaign:** {row.get('campaign_name', 'N/A')}")
@@ -681,18 +685,32 @@ def show_paid_campaign_insights():
 
                             with col3:
                                 # Show performance metrics for this creative
-                                st.metric("Impressions", f"{int(row.get('impressions', 0)):,}")
-                                st.metric("Clicks", f"{int(row.get('clicks', 0)):,}")
-                                st.metric("Spend", f"${float(row.get('spend', 0)):.2f}")
-                                
-                                ctr = float(row.get('ctr', 0))
-                                st.metric("CTR", f"{ctr:.2f}%")
+                                try:
+                                    impressions = int(float(row.get('impressions', 0)))
+                                    clicks = int(float(row.get('clicks', 0)))
+                                    spend = float(row.get('spend', 0))
+                                    ctr = float(row.get('ctr', 0))
+                                    
+                                    st.metric("Impressions", f"{impressions:,}")
+                                    st.metric("Clicks", f"{clicks:,}")
+                                    st.metric("Spend", f"${spend:.2f}")
+                                    st.metric("CTR", f"{ctr:.2f}%")
+                                except (ValueError, TypeError) as e:
+                                    st.warning("⚠️ Metrics data format error")
+                                    logger.debug(f"Metrics error: {e}")
                 else:
-                    st.info("No creative previews available for current campaigns.")
-                    st.write("**Possible reasons:**")
-                    st.write("• Creative data not fetched (check include_creatives setting)")
-                    st.write("• No image URLs available in creative objects")
-                    st.write("• Rate limiting prevented creative data fetch")
+                    st.info("💡 No creative previews available for current campaigns.")
+                    with st.expander("🔍 Troubleshooting"):
+                        st.write("**Possible reasons:**")
+                        st.write("• Creative data not fetched (check include_creatives setting)")
+                        st.write("• No image URLs available in creative objects")
+                        st.write("• Rate limiting prevented creative data fetch")
+                        st.write("• Ads may not have image-based creatives")
+                        
+                        if not creative_rows.empty:
+                            st.write("**Available creative fields:**")
+                            creative_fields = [col for col in paid_data.columns if 'creative' in col]
+                            st.write(creative_fields)
 
         except Exception as e:
             st.error(f"Error loading paid campaign data: {str(e)}")
@@ -707,19 +725,27 @@ def validate_environment():
         'META_ACCESS_TOKEN': bool(os.getenv('META_ACCESS_TOKEN')),
         'AD_ACCOUNT_ID': bool(os.getenv('AD_ACCOUNT_ID')),
         'OPENAI_API_KEY': bool(os.getenv('OPENAI_API_KEY')),
+        'META_APP_ID': bool(os.getenv('META_APP_ID')),
+        'META_APP_SECRET': bool(os.getenv('META_APP_SECRET')),
     }
     
     missing_vars = [var for var, present in env_status.items() if not present]
     
     if missing_vars:
         st.sidebar.warning(f"⚠️ Missing environment variables: {', '.join(missing_vars)}")
-        with st.sidebar.expander("Environment Setup Help"):
+        with st.sidebar.expander("🔧 Environment Setup Help"):
             st.write("**Required for Instagram insights:**")
             st.code("PAGE_ID, IG_USER_ID, PAGE_ACCESS_TOKEN")
             st.write("**Required for paid campaigns:**")
             st.code("AD_ACCOUNT_ID, META_ACCESS_TOKEN")
+            st.write("**Recommended for security:**")
+            st.code("META_APP_ID, META_APP_SECRET")
             st.write("**Optional for AI features:**")
             st.code("OPENAI_API_KEY")
+            st.write("**How to set in Replit:**")
+            st.write("1. Click the 🔒 Secrets tab in the sidebar")
+            st.write("2. Add each environment variable")
+            st.write("3. Restart your app")
     else:
         st.sidebar.success("✅ All environment variables configured")
     
