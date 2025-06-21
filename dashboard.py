@@ -15,6 +15,10 @@ from typing import Dict, List, Optional, Any
 import requests
 import re
 
+# Configure logging FIRST before any other imports that might use logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Import our modules
 from fetch_organic import (
     fetch_ig_media_insights, 
@@ -54,9 +58,7 @@ st.set_page_config(
 import openai
 from config import config
 
-# Configure logging first
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Logger already configured at top of file
 
 @st.cache_data(ttl=600)
 def cached_fetch_ig_media_insights(ig_user_id: str, since: str = None, until: str = None) -> pd.DataFrame:
