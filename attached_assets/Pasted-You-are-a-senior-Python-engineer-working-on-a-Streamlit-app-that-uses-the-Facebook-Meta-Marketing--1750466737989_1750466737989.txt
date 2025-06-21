@@ -1,0 +1,63 @@
+You are a senior Python engineer working on a Streamlit app that uses the Facebook (Meta) Marketing API (via facebook_business SDK and direct Graph HTTP calls). The project includes modules like `fetch_paid.py`, `fetch_organic.py`, `fb_client.py`, and an `api_helpers.py` that centralizes API call logic, rate-limiting, retries, caching, and error handling.
+
+We have encountered a syntax error in `api_helpers.py` at line ~264 indicating “invalid syntax” likely due to stray text/comment or improperly formatted docstring. Beyond syntax, we need to harden and optimize this module:
+
+1. **Fix Syntax Errors**: Ensure the file is valid Python 3 code. Remove stray non-Python prose in code, wrap large comments in proper `""" ... """` docstrings or `#` comments. Guarantee no unmatched braces or indentation issues.
+
+2. **Safe API Call Wrapper**: Implement a `safe_api_call(func, *args, **kwargs)` function to wrap any Graph API or SDK call. It should:
+   - Catch network errors, FacebookRequestError, HTTP errors, JSON parsing errors.
+   - On rate-limit errors (HTTP 400/403 with code 17 or similar), perform exponential backoff with jitter (e.g., initial delay ~1s, multiply by 2 up to max ~60s), retry up to a configurable number of attempts.
+   - On transient network errors (connection timeouts, etc.), retry similarly.
+   - On other non-recoverable errors, log and propagate or return a structured error indicator.
+
+3. **Rate-Limiting & Throttling**:
+   - Count API calls per session or time window. Optionally allow configuring a maximum calls-per-minute and automatically throttle if approaching.
+   - Provide logging of call counts and endpoints to identify hotspots.
+
+4. **Batch / Bulk Fetch Helpers**:
+   - For endpoints supporting batch or field expansion (e.g. Insights with multiple fields), provide helper functions to split large lists into chunks and fetch in bulk rather than per-item loops.
+
+5. **Caching Layer**:
+   - Use a JSON-serializable cache (e.g., store dicts/lists; avoid storing raw bytes). If caching binary content, encode (e.g., base64) or avoid caching raw bytes.
+   - For simple in-memory caching, use a dict with expiration timestamps. For persistent caching across runs, optionally use a local file (e.g., a JSON file) or a lightweight SQLite (already available via data_store).
+   - Wrap caching in try/except: if serialization fails, log warning and skip caching that entry, but continue execution.
+
+6. **Logging**:
+   - Use Python’s `logging` module consistently. Prefix logs with module context. On retries, log attempt count and delay. On final failure, log detailed info (endpoint, params, error message, fbtrace_id if available).
+   - Remove or clean up any ad-hoc print statements or malformed f-strings causing syntax errors (e.g., unmatched braces).
+
+7. **Configuration**:
+   - Allow configurable parameters via environment variables or a config dict:
+     - Max retries, base backoff seconds, max backoff seconds.
+     - Cache toggle and expiration times.
+     - Rate-limit thresholds.
+   - Provide defaults but allow override.
+
+8. **JSON Serialization**:
+   - Ensure any cached data structures (e.g., API responses) are JSON-serializable. If needing to cache complex objects, extract only plain-data parts (e.g., `response.json()` dicts).
+
+9. **Utilities**:
+   - Helper to build Graph API URLs consistently (versioned base URL).
+   - Helper to extract paging cursors and automatically paginate if needed (e.g., fetch all pages up to a limit).
+   - Helper to validate tokens/env vars before calls.
+
+10. **Documentation**:
+   - Add module-level docstring summarizing functionality.
+   - For each function, add docstring describing inputs/outputs and behavior.
+
+---
+
+**Deliverable**: A full `api_helpers.py` file content. The AI should produce a self-contained Python module named `api_helpers.py`, implementing the above features. It should be syntactically correct and ready to drop into your codebase. It should not include unrelated commentary; just the code (with docstrings and comments as needed). It should reference environment variables for config, use `logging` for logs, use `requests` or `facebook_business` SDK calls within `safe_api_call`, etc.
+
+You can assume imports for:
+```python
+import os
+import time
+import json
+import base64
+import logging
+import threading
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, Optional, Tuple
+import requests
+from facebook_business.exceptions import FacebookRequestError, FacebookError

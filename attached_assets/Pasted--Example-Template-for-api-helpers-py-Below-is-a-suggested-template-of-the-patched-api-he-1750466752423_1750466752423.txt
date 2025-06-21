@@ -1,0 +1,352 @@
+---
+
+**Example Template for `api_helpers.py`**
+
+Below is a suggested template of the patched `api_helpers.py` implementing the above. You can feed this into your AI assistant or copy directly, adapting to your environment and code style. Replace or merge with existing functions in your repository.
+
+```python
+"""
+api_helpers.py
+
+Provides safe, rate-limited, cached wrappers around Meta Graph API calls for paid and organic data.
+Implements exponential backoff, caching, pagination, and bulk-fetch utilities.
+"""
+
+import os
+import time
+import json
+import logging
+import threading
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, Optional, Tuple, List, Union
+import requests
+
+# If using facebook_business SDK
+try:
+    from facebook_business.api import FacebookAdsApi
+    from facebook_business.exceptions import FacebookRequestError, FacebookError
+except ImportError:
+    FacebookAdsApi = None
+    FacebookRequestError = Exception
+    FacebookError = Exception
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # Basic config if not set
+    logging.basicConfig(level=logging.INFO)
+
+# Configuration via environment variables with defaults
+API_VERSION = os.getenv("GRAPH_API_VERSION", "v23.0")
+GRAPH_API_BASE = f"https://graph.facebook.com/{API_VERSION}"
+MAX_RETRIES = int(os.getenv("API_HELPERS_MAX_RETRIES", "5"))
+BACKOFF_BASE = float(os.getenv("API_HELPERS_BACKOFF_BASE", "1.0"))  # seconds
+BACKOFF_MAX = float(os.getenv("API_HELPERS_BACKOFF_MAX", "60.0"))
+REQUEST_TIMEOUT = float(os.getenv("API_HELPERS_REQUEST_TIMEOUT", "10.0"))  # seconds per request
+CACHE_ENABLED = os.getenv("API_HELPERS_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
+CACHE_EXPIRATION_SECONDS = int(os.getenv("API_HELPERS_CACHE_EXPIRATION_SECONDS", "3600"))  # 1 hour default
+
+# In-memory cache structure: {key: (timestamp, data_dict)}
+_cache_lock = threading.Lock()
+_cache_store: Dict[str, Tuple[float, Any]] = {}
+
+def _make_cache_key(*args, **kwargs) -> str:
+    """
+    Create a JSON-based cache key from args and kwargs.
+    """
+    try:
+        key = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True, default=str)
+    except Exception:
+        key = str((args, kwargs))
+    return key
+
+def cache_get(key: str) -> Optional[Any]:
+    """
+    Retrieve from in-memory cache if not expired. Return None if missing/expired.
+    """
+    if not CACHE_ENABLED:
+        return None
+    with _cache_lock:
+        entry = _cache_store.get(key)
+        if entry:
+            ts, data = entry
+            if time.time() - ts < CACHE_EXPIRATION_SECONDS:
+                logger.debug("Cache HIT for key: %s", key)
+                return data
+            else:
+                logger.debug("Cache EXPIRED for key: %s", key)
+                _cache_store.pop(key, None)
+        return None
+
+def cache_set(key: str, data: Any) -> None:
+    """
+    Store data in in-memory cache with current timestamp. Data must be JSON-serializable.
+    """
+    if not CACHE_ENABLED:
+        return
+    try:
+        # Test JSON serialization
+        json.dumps(data, default=str)
+    except Exception as e:
+        logger.warning("Skipping cache_set: data not JSON-serializable: %s", e)
+        return
+    with _cache_lock:
+        _cache_store[key] = (time.time(), data)
+        logger.debug("Cache SET for key: %s", key)
+
+def safe_api_call(
+    func: Callable[..., Any],
+    *args,
+    retry_count: int = MAX_RETRIES,
+    backoff_base: float = BACKOFF_BASE,
+    backoff_max: float = BACKOFF_MAX,
+    **kwargs
+) -> Any:
+    """
+    Wrap an API call (requests or SDK) with retries, exponential backoff, and error handling.
+    `func` should be a callable that performs the API request when called with *args and **kwargs.
+    Returns the successful response object or raises after exhausting retries.
+    """
+    attempt = 0
+    delay = backoff_base
+    while attempt < retry_count:
+        try:
+            result = func(*args, **kwargs)
+            return result
+        except FacebookRequestError as fe:
+            # Extract info if possible
+            message = getattr(fe, 'body', str(fe))
+            code = None
+            # Attempt to parse code from error body if JSON
+            try:
+                body = json.loads(fe.body) if isinstance(fe.body, str) else None
+                code = body.get('error', {}).get('code') if body else None
+            except Exception:
+                pass
+            # Rate limit or transient?
+            if code in (17,):  # 17 = user request limit reached
+                logger.warning("Rate limit reached (code %s). Backoff for %.1fs before retry. Error: %s", code, delay, message)
+                time.sleep(delay)
+                delay = min(delay * 2, backoff_max)
+                attempt += 1
+                continue
+            # Other Facebook errors: decide if retryable?
+            logger.error("FacebookRequestError not rate-limit or not retryable: %s", fe)
+            raise
+        except requests.exceptions.RequestException as re:
+            # Network-level errors
+            logger.warning("Network error on API call: %s. Backoff for %.1fs before retry.", re, delay)
+            time.sleep(delay)
+            delay = min(delay * 2, backoff_max)
+            attempt += 1
+            continue
+        except Exception as e:
+            # Unexpected error - log and break or rerise
+            logger.error("Unexpected error in API call: %s", e, exc_info=True)
+            raise
+    # If we exit loop without return, raise a final exception
+    raise RuntimeError(f"API call failed after {retry_count} attempts")
+
+def http_get(url: str, params: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """
+    Simple GET via requests, wrapped in safe_api_call. Returns JSON dict or raises.
+    """
+    def _call():
+        resp = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        try:
+            body = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            # If no JSON but status 200, return empty dict
+            return {}
+        if resp.status_code != 200:
+            # Raise for safe_api_call to catch
+            error_info = body.get("error") if isinstance(body, dict) else resp.text
+            raise FacebookRequestError(str(error_info))
+        return body
+    return safe_api_call(_call)
+
+def http_post(url: str, data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """
+    Simple POST via requests, wrapped in safe_api_call. Returns JSON dict or raises.
+    """
+    def _call():
+        resp = requests.post(url, data=data, headers=headers, timeout=REQUEST_TIMEOUT)
+        try:
+            body = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            return {}
+        if resp.status_code not in (200, 201):
+            error_info = body.get("error") if isinstance(body, dict) else resp.text
+            raise FacebookRequestError(str(error_info))
+        return body
+    return safe_api_call(_call)
+
+def paginate_get(
+    endpoint: str,
+    params: Dict[str, Any],
+    limit_per_page: int = 100,
+    max_pages: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """
+    Automatically paginate through Graph API paged GET results.
+    - endpoint: full URL (e.g. f"{GRAPH_API_BASE}/{object_id}/insights")
+    - params: dict of parameters; will be updated with 'limit' and 'after' cursor.
+    - limit_per_page: how many items per page
+    - max_pages: optional max number of pages to fetch
+    Returns a list combining all `data` entries.
+    """
+    all_data = []
+    page_count = 0
+    next_after = None
+    while True:
+        p = params.copy()
+        p['limit'] = limit_per_page
+        if next_after:
+            p['after'] = next_after
+        logger.debug("paginate_get: fetching page %d from %s with params: %s", page_count+1, endpoint, p)
+        resp = http_get(endpoint, p)
+        data = resp.get('data', [])
+        all_data.extend(data)
+        page_count += 1
+        # Break conditions
+        paging = resp.get('paging', {})
+        cursors = paging.get('cursors', {})
+        next_after = cursors.get('after')
+        if not next_after:
+            break
+        if max_pages and page_count >= max_pages:
+            break
+    logger.info("paginate_get: fetched %d items from %s after %d pages", len(all_data), endpoint, page_count)
+    return all_data
+
+def get_graph_api_url(path: str) -> str:
+    """
+    Build full Graph API URL for a given path (without leading slash).
+    e.g. path="2093978137560528/insights"
+    """
+    path = path.lstrip('/')
+    return f"{GRAPH_API_BASE}/{path}"
+
+def fetch_insights_with_paging(
+    object_id: str,
+    metrics: List[str],
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    period: str = "day",
+    extra_params: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Fetch insights for a Page or Instagram media with automatic pagination.
+    - object_id: page_id or media_id
+    - metrics: list of metric names
+    - since/until: 'YYYY-MM-DD' strings
+    - period: e.g. 'day'
+    Returns list of raw insight objects.
+    """
+    path = f"{object_id}/insights"
+    url = get_graph_api_url(path)
+    params: Dict[str, Any] = {"metric": ",".join(metrics), "period": period}
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    if token:
+        params["access_token"] = token
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
+    if extra_params:
+        params.update(extra_params)
+    logger.info("fetch_insights_with_paging: url=%s params=%s", url, {k: v for k, v in params.items() if k != "access_token"})
+    try:
+        data = paginate_get(url, params)
+        return data
+    except Exception as e:
+        logger.error("fetch_insights_with_paging failed: %s", e, exc_info=True)
+        return []
+
+# Example helper for SDK-based calls:
+def sdk_call_with_backoff(sdk_func: Callable[..., Any], *args, **kwargs) -> Any:
+    """
+    Wrap SDK calls similarly to safe_api_call.
+    sdk_func is a function from facebook_business SDK, e.g. account.get_insights.
+    """
+    def _call():
+        return sdk_func(*args, **kwargs)
+    return safe_api_call(_call)
+
+# Example function to fetch ad insights with correct fields and without invalid nested 'creative' in fields:
+def fetch_ad_insights_fields(
+    account_id: str,
+    level: str,
+    fields: List[str],
+    date_preset: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    params_extra: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Fetch ad insights using facebook_business SDK or HTTP call, ensuring fields are valid.
+    """
+    # If using SDK:
+    if FacebookAdsApi:
+        from facebook_business.adobjects.adaccount import AdAccount
+        account = AdAccount(f"act_{account_id}")
+        # Build params dict:
+        insight_params: Dict[str, Any] = {"level": level, "fields": ",".join(fields)}
+        if date_preset:
+            insight_params["date_preset"] = date_preset
+        if since and until:
+            insight_params["time_range"] = {"since": since, "until": until}
+        if params_extra:
+            insight_params.update(params_extra)
+        try:
+            # Use sdk_call_with_backoff to wrap get_insights
+            edges = sdk_call_with_backoff(account.get_insights, params=insight_params)
+            # edges may be a cursor-like object; convert to list of dicts
+            results = []
+            for edge in edges:
+                results.append(edge.export_all_data())
+            return results
+        except Exception as e:
+            logger.error("fetch_ad_insights_fields SDK call failed: %s", e)
+            # Fall back to HTTP if desired
+    # Fallback to HTTP GET:
+    path = f"act_{account_id}/insights"
+    url = get_graph_api_url(path)
+    params: Dict[str, Any] = {"fields": ",".join(fields)}
+    if date_preset:
+        params["date_preset"] = date_preset
+    if since and until:
+        params["since"] = since
+        params["until"] = until
+    if params_extra:
+        params.update(params_extra)
+    token = os.getenv("META_ACCESS_TOKEN")
+    if token:
+        params["access_token"] = token
+    try:
+        data = paginate_get(url, params)
+        return data
+    except Exception as e:
+        logger.error("fetch_ad_insights_fields HTTP call failed: %s", e)
+        return []
+
+# Additional helpers: token validation, permission checks etc.
+def validate_env_vars(vars_list: List[str]) -> Tuple[bool, List[str]]:
+    """
+    Check that each env var in vars_list is set and non-empty.
+    Returns (all_present, missing_list).
+    """
+    missing = [v for v in vars_list if not os.getenv(v)]
+    return (len(missing) == 0, missing)
+
+# Example usage inside other modules:
+# from api_helpers import fetch_insights_with_paging, fetch_ad_insights_fields
+
+# In fetch_organic.py:
+# data = fetch_insights_with_paging(page_id, metrics, since, until)
+
+# In fetch_paid.py:
+# data = fetch_ad_insights_fields(ad_account_id, level="campaign", fields=[...], date_preset="last_7d")
+
+# End of api_helpers.py
