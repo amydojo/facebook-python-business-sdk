@@ -260,7 +260,6 @@ def batch_facebook_requests(requests: list, batch_size: int = 50) -> list:
 
 # Initialize cache on import
 init_cache_db()
-```
 
 The code implements API helpers for Facebook Marketing API with rate limiting, error handling, and caching.
 ```python
