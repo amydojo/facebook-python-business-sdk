@@ -1,4 +1,3 @@
-
 """
 Facebook Business SDK client initialization.
 Official docs: https://developers.facebook.com/docs/business-sdk/getting-started/
@@ -22,6 +21,35 @@ except ImportError as e:
     SDK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+def validate_credentials():
+    """
+    Check that all required environment variables and tokens for Meta and IG are present.
+    Raises RuntimeError if any required variable is missing.
+    """
+    missing = []
+    required_vars = [
+        "META_ACCESS_TOKEN",
+        "AD_ACCOUNT_ID", 
+        "PAGE_ID",
+        "IG_USER_ID",
+        "PAGE_ACCESS_TOKEN",
+        "META_APP_ID",
+        "META_APP_SECRET",
+        "OPENAI_API_KEY"
+    ]
+
+    for var in required_vars:
+        if not os.getenv(var):
+            missing.append(var)
+
+    if missing:
+        msg = f"Missing required environment variables: {', '.join(missing)}"
+        logger.error(msg)
+        raise RuntimeError(msg)
+
+    logger.info("fb_client: All required credentials are set.")
+    return True
 
 # Log import paths to confirm correct SDK loading
 if SDK_AVAILABLE:

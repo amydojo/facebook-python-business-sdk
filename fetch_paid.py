@@ -34,7 +34,13 @@ import json
 from api_helpers import safe_api_call, batch_facebook_requests, get_api_stats, sdk_call_with_backoff
 
 # Import fb_client for API access
-from fb_client import fb_client, validate_credentials
+from fb_client import fb_client
+try:
+    from fb_client import validate_credentials
+except ImportError:
+    def validate_credentials():
+        """Fallback validate_credentials if not available in fb_client"""
+        return True
 
 # Facebook Business SDK imports
 try:
