@@ -1,0 +1,154 @@
+You are a senior Python engineer with deep knowledge of Meta (Facebook/Instagram) Graph API, Facebook Business SDK, Streamlit UI, and advanced marketing analytics. Your task: review and patch the existing Replit codebase consisting of files:
+- fb_client.py
+- fetch_paid.py
+- fetch_organic.py
+- dashboard.py
+- data_store.py
+- forecast.py
+and any other modules under /mnt/data.
+
+Goals:
+1. **Fix critical import and NameError issues**:
+   - In `dashboard.py`, ensure `import openai` is present before setting `openai.api_key`.
+   - Ensure `fb_client` is imported correctly where used (e.g., in fetch_paid, use `from fb_client import fb_client` or pass it in).
+   - Remove bad print statements or unmatched braces (SyntaxError in fb_client.py).
+2. **Ads Insights fields corrections**:
+   - In fetch_paid (e.g., `fetch_ad_insights`), remove invalid nested `creative{...}` fields in the `fields` param for insights. Instead:
+     - Fetch basic ad insights fields first (e.g. `ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,impressions,clicks,spend,reach,ctr,cpc,cpm,date_start,date_stop`).
+     - Then, for creative details, after receiving the ad IDs, make separate calls to `/AD_ID?fields=creative{...}` or use the AdCreative endpoints. Do not pass `creative{...}` inside the insights `fields` param.
+   - Validate against the official Marketing API docs: https://developers.facebook.com/docs/marketing-api/reference/ads-insights/
+3. **Instagram Insights improvements**:
+   - In `fetch_organic.py`, patch `fetch_ig_media_insights` (or equivalent) to:
+     1. For each media item, first GET `/MEDIA_ID?fields=media_type,media_product_type,permalink,thumbnail_url,media_url,...` to know its type (IMAGE, VIDEO, CAROUSEL_ALBUM, REEL, etc.).
+     2. Maintain a mapping of supported metrics by media_product_type from official docs: e.g. for Reels: `ig_reels_video_view_total_time`, `ig_reels_avg_watch_time`, `clips_replays_count`, `ig_reels_aggregated_all_plays_count`, `views`, etc. For videos: `video_views`, `plays` may or may not be supported. For image posts: likes, comments, shares, saves, profile_visits, etc.
+     3. Query `/MEDIA_ID/insights?metric={comma-separated supported metrics}`. If a metric yields “unsupported for this media product type,” remove it and retry the call only for the remaining supported ones.
+     4. Collect returned data into a long-form DataFrame with columns `['media_id','timestamp','metric','value','permalink','media_type','media_product_type','media_url','thumbnail_url']`.
+   - Also fetch additional organic data: e.g. follower growth (GET `/IG_USER_ID?fields=followers_count,username`), story insights if possible (if you have appropriate permissions), and aggregated trends (e.g. weekly engagement rate: total engagements ÷ follower count).
+   - Provide a comprehensive, updateable dictionary/list of all Instagram metrics from the docs and dynamically pick based on metadata. For example:
+     ```python
+     IG_METRICS_BY_TYPE = {
+         "REELS": ["impressions","reach","likes","comments","shares","saves","ig_reels_video_view_total_time","ig_reels_avg_watch_time","clips_replays_count","ig_reels_aggregated_all_plays_count","views","profile_visits","follows","navigation"],
+         "VIDEO": ["impressions","reach","video_views","plays","likes","comments","shares","saves","profile_visits","follows","navigation"],
+         "IMAGE": ["impressions","reach","likes","comments","shares","saves","profile_visits","follows","navigation"],
+         "CAROUSEL_ALBUM": ["impressions","reach","engagement","likes","comments","shares","saves","profile_visits","follows","navigation"],
+         # adjust keys to match actual `media_product_type` or `media_type`.
+     }
+     ```
+   - Use Graph API version v23.0 or latest supported. Wrap requests in a `safe_api_call` helper that:
+     - Catches rate-limit or transient errors, backs off, retries up to 3 times with exponential delay.
+     - Honors response headers (`x-app-usage`, `x-ad-account-usage`) to throttle proactively.
+   - Implement caching: store fetched Instagram insights JSON in local cache (e.g. disk or in-memory with TTL) so repeated dashboard reloads don’t refetch unchanged items.
+4. **Page Insights corrections**:
+   - In `fetch_organic.py`, for Page insights metadata: GET `/PAGE_ID/insights/metadata?access_token=...` is incorrect since metadata endpoint requires a valid `metric` param or uses `/insights?metric=`. Instead, maintain a fixed whitelist of common valid Page metrics (e.g., `page_impressions`, `page_impressions_organic`, `page_impressions_paid`, `page_engaged_users`, `page_post_engagements`, `page_follower_adds`, etc.), or fetch `/PAGE_ID/insights?since=...&until=...&metric=...` directly. Avoid retrieving “metadata” generically because Graph sometimes rejects if no metric param is provided. Use fallback lists documented here: https://developers.facebook.com/docs/graph-api/reference/page/insights/
+   - Dynamically test each metric once (or use `/insights/metadata?metric=page_impressions` etc.) to verify validity; build your local list from that.
+   - Return long-format DataFrame: `['date','metric','value']`, pivoted or kept long as needed.
+5. **Dashboard UI fixes**:
+   - In `dashboard.py`, fix misuse of `st.columns` when nested inside columns: ensure that calls to `st.columns(...)` are only at top-level or one level deep. If you need nested layout, do `with col:` blocks correctly.
+   - For Instagram posts: instead of showing raw IDs, fetch and display media thumbnails or preview images side-by-side:
+     ```python
+     cols = st.columns([1, 3])
+     with cols[0]:
+         st.image(row["thumbnail_url"], use_column_width=True)
+     with cols[1]:
+         st.markdown(f"[View on Instagram]({row['permalink']})")
+         st.write(f"Metrics for {row['timestamp']}:")
+         st.table(filtered_metrics_df)  # long-format pivoted for readability
+     ```
+   - Improve chart readability: use larger fonts, add interactive filters (date pickers, metric selectors). Use Streamlit’s Altair or Plotly components if needed, but stick to simple matplotlib charts with auto-scaling text.
+   - Provide summary cards: e.g., “Total reach last 7 days: X”, “Avg engagement rate: Y%”.
+   - For paid campaigns: show creative previews: after fetching creative IDs, fetch creative object fields like `image_url`, `body`, `title`, `object_url`; display with `st.image(...)` and text next to metrics.
+   - Handle rate-limit gracefully in UI: if fetch fails repeatedly, show a notice “Data temporarily unavailable due to API limits; last successful fetch at ...” and use cached data.
+6. **Rate-limiting and batching**:
+   - Wrap all Graph calls in a helper that tracks call counts, uses batch requests when possible (Graph batch endpoint) for multiple IDs. For example, to fetch creative details for 15 ads at once, use batch or multi-request endpoints rather than one-by-one.
+   - Implement delays between requests if near limit.
+7. **OpenAI integration**:
+   - In `dashboard.py`, add `import openai`, set `openai.api_key` early. Provide a helper function `generate_insights_prompt(df_paid, df_page, df_ig)` that constructs a high-context prompt for narrative analysis. Use concise summaries rather than raw tables to avoid token bloat.
+   - Catch errors from OpenAI calls (e.g., remove unsupported `proxies` argument), adjust client initialization accordingly.
+8. **Configuration and environment**:
+   - Ensure environment variables: `PAGE_ID`, `IG_USER_ID`, `PAGE_ACCESS_TOKEN`, `AD_ACCOUNT_ID`, `META_ACCESS_TOKEN`, `META_APP_ID`, `META_APP_SECRET`, `OPENAI_API_KEY`.
+   - Validate at startup and show clear error/warning if missing.
+   - In Replit, store secrets properly.
+9. **Logging & Monitoring**:
+   - Maintain `logging` with structured messages. Add counters for API calls, warnings when any insights endpoint returns no data.
+   - Optionally write a small internal API-usage dashboard (could be a separate Streamlit page/section) showing usage over time.
+10. **Testing & Verification**:
+    - After patches, manually test with a few recent media items (including Reels) to confirm you get expected metrics like `ig_reels_video_view_total_time`, `ig_reels_avg_watch_time`, `plays` if supported, etc.
+    - Use Graph API Explorer to cross-check support per media type.
+    - For Ads insights, verify valid fields via the API reference (e.g., use `fields=campaign_name,impressions,clicks,spend,reach,frequency,...`).
+11. **Code structure & readability**:
+    - Reorganize large functions into smaller helpers: e.g., in `fetch_organic.py`: `get_media_list()`, `get_media_metadata(media_id)`, `get_media_insights(media_id, metrics)`, `choose_supported_metrics(media_type)`.
+    - In `fetch_paid.py`: extract `safe_fetch_insights(level, fields, params)` helper.
+    - In `fb_client.py`: fix syntax errors (remove mismatched braces), ensure proper initialization logs but no stray print f-strings.
+12. **Final integration & UX polish**:
+    - Streamline dashboard flow: sidebar for date ranges, toggles for organic vs paid, toggles for channel selection.
+    - Show combined charts: overlay paid spend vs. organic reach dips/spikes.
+    - Add export buttons (e.g., CSV download) for deeper offline analysis.
+    - Provide troubleshooting section in UI: show last fetch errors with tips (e.g., “Check PAGE_ACCESS_TOKEN scopes: pages_read_engagement & instagram_manage_insights”).
+    - Provide “Refresh data” button that uses background fetch and caches results, showing a spinner.
+    - For Reels: display thumbnail plus a small embedded video preview if possible (via permalink embed), or at least link.
+    - For Ads creative: display creative image/video thumbnails.
+    - Add key performance indicators (KPIs) like engagement rate, CTR vs. industry benchmarks (optionally hard-coded or user-provided benchmarks).
+    - Add alerting: if a metric deviates by >X% from previous period, highlight in UI.
+13. **Detailed file-by-file instructions**:
+    - **fb_client.py**:
+      - Fix any SyntaxError (e.g. unmatched `}` in print statements).
+      - Ensure `FacebookClient` initializes once; make `fb_client = FacebookClient()` accessible; fix NameError in fetch_paid by ensuring `from fb_client import fb_client`.
+      - Remove any circular imports: e.g., do not have a local `facebook_business` folder conflicting with SDK.
+    - **fetch_paid.py**:
+      - At top, import `fb_client` properly.
+      - In `fetch_ad_insights`, adjust `fields` list: remove nested `creative{...}`. After getting insights rows with ad IDs, call a new helper `fetch_creative_details(ad_id_list)` that calls Graph `/adcreative?fields=image_url,body,title,...` for each or in batch.
+      - Catch rate-limit errors (`error code 17`) with backoff and caching.
+      - Return a long-form or pivoted DataFrame as needed by dashboard.
+    - **fetch_organic.py**:
+      - Add robust metadata-based metric selection for Instagram.
+      - Fix Page insights metadata calls: replace with fixed whitelist or per-metric metadata check.
+      - Return DataFrames in long format for easier UI filtering.
+    - **dashboard.py**:
+      - Add `import openai`.
+      - Wrap API key assignment: 
+        ```python
+        import openai
+        openai.api_key = os.getenv("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
+        ```
+      - Fix layout nesting: ensure any `st.columns` calls are not nested inside another `st.columns` improperly.
+      - Implement UI improvements listed above.
+    - **data_store.py**:
+      - If caching, add functions to read/write cached JSON/CSV for insights; ensure thread-safety if using background fetch.
+    - **forecast.py**:
+      - If forecasting, integrate with updated DataFrames; ensure inputs handle long-form data.
+14. **Packaging & Dependencies**:
+    - Ensure `requirements.txt` includes `facebook-business`, `requests`, `pandas`, `streamlit`, `openai`, etc. On Replit, install via pip.
+    - Remove any conflicting local modules named `facebook_business` that shadow the SDK.
+    - For Instagram API, if needed, use direct HTTP calls via `requests`; no separate SDK.
+15. **Deliverable**:
+    - After applying patches, provide updated code snippets or commit diff style. Ensure everything runs in Replit without errors.
+    - Return a summary report of changes made per file.
+    - Provide sample outputs (e.g., screenshot descriptions or DataFrame head examples) verifying that Reels metrics like watch time appear.
+    - Provide instructions for the user: how to test, how to supply tokens, how to interpret logs.
+16. **Advanced “next-level” features**:
+    - Suggest using webhooks / Subscriptions for Instagram (if available) or Conversion API for ad conversions instead of polling.
+    - If possible, show how to integrate Meta’s new aggregated event measurement or offline conversions.
+    - Propose using OpenAI to generate automated recommendations (“Your last Reel underperformed average watch time by 20%—consider posting at different time or using trending audio”).
+    - Suggest adding A/B test tracking: allow user to tag creative variants in Airtable, merge with ad insights to detect winner automatically.
+    - Integrate Airtable: fetch leads & transactions, join with paid data to compute true ROI (use your revenue attribution logic).
+    - Offer blueprint for revenue attribution: outline steps to join Meta ad click data with Airtable lead/transaction records via click IDs, UTM parameters, Facebook pixel data (Conversion API).
+    - Provide prompt template for AI-driven attribution analysis.
+17. **Rate-Limit & Robustness**:
+    - Implement global `safe_api_call(endpoint_func, *args, **kwargs)` decorated with automatic exponential backoff on 17 errors, caching results, logging.
+    - Implement batch requests via Graph batch API where possible.
+18. **Testing & Validation**:
+    - Write small unit tests or quick manual test code to confirm fetch functions return non-empty DataFrames for a known Page/IG account.
+    - Validate DataFrame columns include expected metric columns.
+19. **Final output**:
+    - Provide the patched code for each file in full, ready to replace existing content.
+    - Provide instructions on where to insert or replace code blocks.
+    - Provide a final “how to run” checklist: ensure environment variables, pip install, `streamlit run dashboard.py`, check logs.
+
+Action: 
+- Clone the Replit workspace or access the files.
+- Open each file, apply the above patches.
+- After patching, run the app; verify no errors in logs.
+- Confirm Instagram Reels watch time etc. appear.
+- Confirm Ads creative previews appear.
+
+Please proceed file-by-file, produce updated code snippets for each significant change, and at the end, provide a summary of how to test and validate. Focus on making the dashboard robust, clear, and advanced for 2025 performance marketing use cases. Use the official Meta docs links provided to validate metric names. Use Python best practices, structured logging, and Streamlit UI guidelines.
