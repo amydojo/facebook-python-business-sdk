@@ -1,0 +1,37 @@
+You are an expert Python developer and AI assistant. I have a Streamlit-based Replit project with modules including api_helpers.py, fetch_organic.py, fetch_paid.py, fb_client.py, dashboard.py, data_store.py, etc., which fetch Instagram organic insights and Facebook ad insights via the Facebook/Meta Graph Marketing API. The current code suffers from:
+- SyntaxErrors in api_helpers.py.
+- Organic insights always returning no data because the metadata endpoint fails and the fallback curated metrics list contains unsupported metrics; dynamic-removal logic strips everything.
+- Paid insights calls using invalid fields (e.g., “status” or nested `creative{…}` fields) causing 400 errors, and errors like `'str' object has no attribute 'export_all_data'` when fetching creative details.
+- Import errors in fb_client.py: missing or misnamed functions like validate_credentials.
+- Inconsistent or outdated Graph API version usage.
+- Date filtering logic may be too strict.
+- Logging shows repeated removal of all metrics for REELS/FEED.
+
+Your task:
+1. Load the entire codebase and examine all modules to understand existing patterns.
+2. Fix any SyntaxErrors in api_helpers.py.
+3. In fetch_organic.py:
+   - Remove reliance on the /insights/metadata endpoint which consistently fails.
+   - Define a mapping SUPPORTED_METRICS_BY_PRODUCT keyed exactly by observed media_product_type values (e.g. "FEED", "REELS", and any others in code) with minimal lists of known-supported metrics for each type.
+   - Use the latest Graph API version (e.g., v23.0 or newer) uniformly.
+   - For each media item, call /{media_id}/insights once with the curated list; if that fails, fall back to individual metric calls to detect any subset that returns data.
+   - Avoid unsupported metrics like profile_visits or follows on media-level insights; only include metrics proven via manual testing or docs.
+   - Loosen or adjust date filtering during debugging; ensure at least one media returns insights.
+   - Add clear logging of which metrics succeeded per media.
+4. In fetch_paid.py and api_helpers.py:
+   - Remove unsupported fields from ad insights calls: eliminate “status” or nested creative{…} fields that produce “not valid for fields param” errors.
+   - Use only valid fields per the latest Marketing API docs (e.g., ad_id, ad_name, campaign_name, impressions, clicks, spend, reach, frequency, ctr, cpc, cpm, unique_clicks if supported, etc.). Verify via the API docs.
+   - For fetching creative details, fix the logic that assumes `.export_all_data` method on the returned object: check object type before calling methods. If the SDK returns a string ID or dict, adapt accordingly: fetch creative fields via proper SDK calls or Graph API calls, handle missing fields gracefully.
+   - Handle rate limiting and retries correctly.
+5. In fb_client.py:
+   - Remove or implement any missing functions like validate_credentials; if unused, remove imports and update calling code.
+   - Ensure initialization uses the correct App ID/Secret and tokens; validate token scopes (instagram_manage_insights, pages_read_engagement, ads_read, ads_management, etc.).
+6. In dashboard.py:
+   - Ensure caching logic handles missing insights gracefully.
+   - Log errors clearly without crashing the app.
+7. Provide the fully patched versions of api_helpers.py, fetch_organic.py, fetch_paid.py, fb_client.py (and any other modules that need changes), including updated import statements, constants for Graph API version, updated metric lists, cleaned-up ad insight field lists, error handling, and logging.
+8. Explain briefly (in comments or a short summary) why each major change was made (e.g., “Removed metadata endpoint because it always returns 400; now using curated mapping for REELS metrics: …”).
+9. Ensure the final code runs without syntax errors and properly fetches at least one organic media insight and one paid ad insight (assuming valid tokens and environment variables).
+10. Optionally include a minimal standalone test snippet or instructions in comments for manually testing one media ID and one ad account call to confirm metrics before integrating in Streamlit.
+
+Use best practices (clear logging, modular functions, robust error handling, up-to-date API version). Return only the patched code files and brief comments in-line; do not output extraneous explanation beyond concise change rationale comments. 
