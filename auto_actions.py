@@ -14,7 +14,16 @@ from facebook_business.adobjects.customaudience import CustomAudience
 from facebook_business.exceptions import FacebookError
 from fb_client import fb_client
 from config import config
-from data_store import log_audit_entry
+
+# Try to import data_store, create a fallback if not available
+try:
+    from data_store import log_audit_entry
+except ImportError:
+    def log_audit_entry(operation_log):
+        """Fallback audit logging function"""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Audit log: {operation_log}")
 
 logger = logging.getLogger(__name__)
 

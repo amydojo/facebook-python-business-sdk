@@ -6,16 +6,28 @@ References:
 - OpenAI Images API: https://platform.openai.com/docs/api-reference/images/create
 """
 import logging
-import openai
+import os
 from config import config
 
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI API
-if config.OPENAI_API_KEY:
-    openai.api_key = config.OPENAI_API_KEY
-else:
-    logger.warning("OPENAI_API_KEY not configured - AI features will be disabled")
+# Try to import OpenAI with proper error handling
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+    
+    # Initialize OpenAI API
+    openai_api_key = config.openai_api_key if hasattr(config, 'openai_api_key') else os.getenv('OPENAI_API_KEY')
+    if openai_api_key:
+        openai.api_key = openai_api_key
+    else:
+        logger.warning("OPENAI_API_KEY not configured - AI features will be disabled")
+        OPENAI_AVAILABLE = False
+        
+except ImportError:
+    OPENAI_AVAILABLE = False
+    openai = None
+    logger.warning("OpenAI package not available - AI features will be disabled")
 
 def call_chat(messages, model="gpt-4", max_tokens=None, temperature=0.7, **kwargs):
     """
@@ -33,14 +45,23 @@ def call_chat(messages, model="gpt-4", max_tokens=None, temperature=0.7, **kwarg
         
     Reference: https://platform.openai.com/docs/api-reference/chat/create
     """
-    if not config.OPENAI_API_KEY:
+    if not OPENAI_AVAILABLE or not openai:
+        logger.error("OpenAI not available")
+        return None
+    
+    openai_api_key = config.openai_api_key if hasattr(config, 'openai_api_key') else os.getenv('OPENAI_API_KEY')
+    if not openai_api_key:
         logger.error("OpenAI API key not configured")
         return None
     
     try:
         logger.info(f"Calling OpenAI Chat API with model {model}")
         
-        response = openai.ChatCompletion.create(
+        # Use the new OpenAI client interface
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_api_key)
+        
+        response = client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=max_tokens,
@@ -52,17 +73,14 @@ def call_chat(messages, model="gpt-4", max_tokens=None, temperature=0.7, **kwarg
         logger.info("Successfully received OpenAI response")
         return content
         
-    except openai.error.AuthenticationError:
-        logger.error("OpenAI authentication failed - check API key")
-        return None
-    except openai.error.RateLimitError:
-        logger.error("OpenAI rate limit exceeded")
-        return None
-    except openai.error.APIError as e:
-        logger.error(f"OpenAI API error: {e}")
-        return None
     except Exception as e:
-        logger.error(f"Unexpected error calling OpenAI: {e}")
+        error_msg = str(e).lower()
+        if 'authentication' in error_msg:
+            logger.error("OpenAI authentication failed - check API key")
+        elif 'rate limit' in error_msg:
+            logger.error("OpenAI rate limit exceeded")
+        else:
+            logger.error(f"OpenAI API error: {e}")
         return None
 
 def get_embedding(text, model="text-embedding-ada-002"):
@@ -76,17 +94,25 @@ def get_embedding(text, model="text-embedding-ada-002"):
     Returns:
         list: embedding vector or None if error
     """
-    if not config.OPENAI_API_KEY:
+    if not OPENAI_AVAILABLE or not openai:
+        logger.error("OpenAI not available")
+        return None
+    
+    openai_api_key = config.openai_api_key if hasattr(config, 'openai_api_key') else os.getenv('OPENAI_API_KEY')
+    if not openai_api_key:
         logger.error("OpenAI API key not configured")
         return None
     
     try:
-        response = openai.Embedding.create(
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_api_key)
+        
+        response = client.embeddings.create(
             model=model,
             input=text
         )
         
-        embedding = response['data'][0]['embedding']
+        embedding = response.data[0].embedding
         logger.info(f"Generated embedding for text (length: {len(text)})")
         return embedding
         
@@ -108,20 +134,28 @@ def generate_image(prompt_text, size="1024x1024", n=1):
         
     Reference: https://platform.openai.com/docs/api-reference/images/create
     """
-    if not config.OPENAI_API_KEY:
+    if not OPENAI_AVAILABLE or not openai:
+        logger.error("OpenAI not available")
+        return None
+    
+    openai_api_key = config.openai_api_key if hasattr(config, 'openai_api_key') else os.getenv('OPENAI_API_KEY')
+    if not openai_api_key:
         logger.error("OpenAI API key not configured")
         return None
     
     try:
         logger.info(f"Generating image with prompt: {prompt_text[:100]}...")
         
-        response = openai.Image.create(
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_api_key)
+        
+        response = client.images.generate(
             prompt=prompt_text,
             n=n,
             size=size
         )
         
-        image_urls = [img['url'] for img in response['data']]
+        image_urls = [img.url for img in response.data]
         logger.info(f"Successfully generated {len(image_urls)} images")
         return image_urls
         

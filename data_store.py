@@ -578,3 +578,34 @@ def log_automation_action(action_type: str, entity_id: str,
                          success: bool = True, result_data: Dict[str, Any] = None):
     """Convenience function for logging automation actions."""
     return data_store.log_automation_action(action_type, entity_id, parameters, dry_run, success, result_data)
+"""
+Simple data store module for audit logging and data persistence.
+"""
+import logging
+import json
+from datetime import datetime
+from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
+
+def log_audit_entry(operation_log: Dict[str, Any]):
+    """
+    Log audit entry for automated actions.
+    
+    Args:
+        operation_log: Dictionary containing operation details
+    """
+    try:
+        # Convert datetime objects to strings for JSON serialization
+        log_entry = operation_log.copy()
+        for key, value in log_entry.items():
+            if isinstance(value, datetime):
+                log_entry[key] = value.isoformat()
+        
+        # Log to standard logger
+        logger.info(f"AUDIT: {json.dumps(log_entry, indent=2)}")
+        
+        # Could be extended to write to database or file
+        
+    except Exception as e:
+        logger.error(f"Error logging audit entry: {e}")

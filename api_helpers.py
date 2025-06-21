@@ -430,7 +430,6 @@ def safe_api_call(
                 usage_header = result.headers.get('x-app-usage', '')
                 if usage_header:
                     try:
-                        import json
                         usage_data = json.loads(usage_header)
                         call_count = usage_data.get('call_count', 0)
                         total_time = usage_data.get('total_time', 0)
@@ -444,7 +443,6 @@ def safe_api_call(
                 ad_usage_header = result.headers.get('x-ad-account-usage', '')
                 if ad_usage_header:
                     try:
-                        import json
                         ad_usage_data = json.loads(ad_usage_header)
                         acc_id_usage = ad_usage_data.get('acc_id_util_pct', 0)
                         if acc_id_usage > 75:  # High ad account usage
