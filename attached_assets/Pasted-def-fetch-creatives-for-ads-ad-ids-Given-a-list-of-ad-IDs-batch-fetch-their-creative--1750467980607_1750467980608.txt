@@ -1,0 +1,52 @@
+def fetch_creatives_for_ads(ad_ids):
+    """
+    Given a list of ad IDs, batch-fetch their creative details in groups of e.g. 50.
+    Returns a dict: {ad_id: {creative fields...}, ...}
+    """
+    from facebook_business.api import FacebookAdsApi
+    from facebook_business.adobjects.ad import Ad
+
+    creatives_map = {}
+    BATCH_SIZE = 50
+    for i in range(0, len(ad_ids), BATCH_SIZE):
+        batch_ids = ad_ids[i:i + BATCH_SIZE]
+        # Use Graph API batch style via SDK: build one call string with ids param
+        ids_param = ','.join(batch_ids)
+        # Fields for creative object:
+        creative_fields = 'creative{body,title,image_url,thumbnail_url,object_url}'  # adjust fields as needed
+        try:
+            # For direct HTTP: GET /?ids=ad1,ad2,...&fields=creative{...}
+            from facebook_business.api import FacebookRequest
+            from facebook_business.adobjects.ad import Ad
+            # Alternatively, you can call via SDK helper:
+            # Example using Ad objects individually:
+            for ad_id in batch_ids:
+                ad_obj = Ad(ad_id)
+                try:
+                    creative_data = ad_obj.api_get(fields=['creative{body,title,image_url,thumbnail_url,object_url}'])
+                    creatives_map[ad_id] = creative_data.get('creative') or {}
+                except Exception as e:
+                    logger.warning(f"Failed fetching creative for ad {ad_id}: {e}")
+                    creatives_map[ad_id] = {}
+        except Exception as e:
+            logger.warning(f"Batch creative fetch error: {e}")
+            # As fallback, fetch individually
+            for ad_id in batch_ids:
+                ad_obj = Ad(ad_id)
+                try:
+                    creative_data = ad_obj.api_get(fields=['creative{body,title,image_url,thumbnail_url,object_url}'])
+                    creatives_map[ad_id] = creative_data.get('creative') or {}
+                except Exception as e2:
+                    logger.warning(f"Fallback: failed fetching creative for ad {ad_id}: {e2}")
+                    creatives_map[ad_id] = {}
+    return creatives_map
+
+# Then, after insights DataFrame:
+insights_records = fetch_ads_insights(AD_ACCOUNT_ID, date_preset='last_7d')
+df_insights = pd.DataFrame(insights_records)
+ad_ids = df_insights['ad_id'].astype(str).tolist()
+creatives_map = fetch_creatives_for_ads(ad_ids)
+# Merge creative fields into df_insights:
+df_insights['creative_body'] = df_insights['ad_id'].map(lambda aid: creatives_map.get(str(aid), {}).get('body'))
+df_insights['creative_title'] = df_insights['ad_id'].map(lambda aid: creatives_map.get(str(aid), {}).get('title'))
+# ...etc.

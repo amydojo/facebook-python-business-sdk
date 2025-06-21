@@ -1,0 +1,115 @@
+import time
+import requests
+
+def safe_api_call(url, params, headers=None, max_retries=3, backoff_factor=1.0):
+    """
+    Wrap requests.get with retries and backoff on 429/500-series.
+    Returns (status_code, json_body or None).
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            code = resp.status_code
+            if code == 200:
+                try:
+                    return 200, resp.json()
+                except ValueError:
+                    return 200, None
+            elif code in (429, 500, 502, 503, 504):
+                # backoff and retry
+                sleep = backoff_factor * (2 ** (attempt - 1))
+                logger.warning(f"Rate limit or server error {code} on {url}; backoff {sleep}s, attempt {attempt}")
+                time.sleep(sleep)
+                continue
+            else:
+                # For other errors, return immediately
+                try:
+                    error_body = resp.json()
+                except ValueError:
+                    error_body = resp.text
+                return code, error_body
+        except requests.RequestException as e:
+            sleep = backoff_factor * (2 ** (attempt - 1))
+            logger.warning(f"Request exception on {url}: {e}; backoff {sleep}s, attempt {attempt}")
+            time.sleep(sleep)
+    logger.error(f"Exceeded retries for {url}")
+    return None, None
+
+def fetch_insights_for_media(media, access_token):
+    """
+    media: dict with at least 'id', 'media_product_type' (e.g. 'REEL', 'IMAGE', etc.), maybe 'media_type'.
+    """
+    media_id = media.get('id')
+    product_type = media.get('media_product_type', '').upper()  # e.g. 'REEL'
+    # 1) Try metadata endpoint
+    metadata_url = f"https://graph.facebook.com/v23.0/{media_id}/insights/metadata"
+    params = {'access_token': access_token}
+    status, body = safe_api_call(metadata_url, params)
+    supported_metrics = None
+    if status == 200 and isinstance(body, dict) and 'data' in body:
+        # metadata returns a list of metric descriptors in body['data']
+        supported_metrics = [item.get('name') for item in body.get('data', []) if item.get('name')]
+        logger.info(f"Media {media_id}: metadata-supported metrics: {supported_metrics}")
+    else:
+        # metadata failed: fallback curated by media_product_type
+        curated = SUPPORTED_METRICS_BY_PRODUCT.get(product_type)
+        if curated:
+            supported_metrics = curated.copy()
+            logger.info(f"Media {media_id}: metadata unavailable, using curated metrics for {product_type}: {supported_metrics}")
+        else:
+            logger.warning(f"Media {media_id}: unknown product_type '{product_type}', cannot pick curated metrics.")
+            return None  # or empty
+    if not supported_metrics:
+        logger.warning(f"Media {media_id}: no supported metrics found.")
+        return None
+
+    # 2) Try fetching insights with the supported_metrics list, removing unsupported ones dynamically
+    insights_url = f"https://graph.facebook.com/v23.0/{media_id}/insights"
+    metrics_to_query = supported_metrics.copy()
+    result = {}
+    # We'll attempt in one call; if that fails with 400 specifying an unsupported metric, parse and retry removing it.
+    while metrics_to_query:
+        params = {
+            'metric': ','.join(metrics_to_query),
+            'access_token': access_token,
+        }
+        status, body = safe_api_call(insights_url, params)
+        if status == 200 and isinstance(body, dict) and 'data' in body:
+            # success: parse data
+            for entry in body['data']:
+                name = entry.get('name')
+                value = entry.get('values', [{}])[0].get('value')
+                result[name] = value
+            logger.info(f"Fetched insights for media {media_id}: {result.keys()}")
+            return result
+        elif status == 400 and isinstance(body, dict) and 'error' in body:
+            msg = body['error'].get('message', '')
+            # Parse which metric is unsupported, e.g. "(#100) metric[0] must be one of the following..."
+            # Try to extract metric name from msg; simpler: iterate through metrics_to_query and test individually removal
+            logger.warning(f"Media {media_id}: insights error: {msg}")
+            # Attempt to identify unsupported metric by testing each
+            removed_any = False
+            for metric in metrics_to_query.copy():
+                # Test single-metric call
+                test_params = {'metric': metric, 'access_token': access_token}
+                st, bd = safe_api_call(insights_url, test_params)
+                if st == 400:
+                    # unsupported metric; remove it
+                    logger.info(f"Removing unsupported metric '{metric}' for media {media_id}")
+                    metrics_to_query.remove(metric)
+                    removed_any = True
+                else:
+                    # metric seems ok; keep it
+                    pass
+            if not removed_any:
+                # Could not identify unsupported metric; abort
+                logger.warning(f"Media {media_id}: cannot identify unsupported metric among {metrics_to_query}; aborting insights fetch")
+                return None
+            # retry loop with reduced metrics_to_query
+        else:
+            # Other status (e.g., None or unexpected): abort
+            logger.warning(f"Media {media_id}: unexpected response fetching insights: status={status}, body={body}")
+            return None
+    # If loop exits without returning, no metrics left
+    logger.warning(f"Media {media_id}: no metrics left after removal; returning None")
+    return None
