@@ -1,0 +1,25 @@
+You are a senior Python engineer tasked with optimizing our Streamlit + Facebook Marketing API integration to avoid “User request limit reached” errors and improve performance. Please apply the following changes:
+
+1. **Identify high-frequency API calls** in our fetch_paid and related modules. Replace per-ad loops with campaign/adset-level insights fetch using the `level` parameter and field expansions (e.g., `fields="campaign_id,campaign_name,impressions,clicks,spend,ctr,cpc,ads{creative{body,thumbnail_url,seal_url}}"`).
+
+2. **Implement safe_api_call wrapper** around all FacebookAdsApi calls, catching `FacebookRequestError` with code 17 (rate limit) and performing exponential backoff (e.g., sleep 5s, 10s, 20s, then abort gracefully). Ensure the wrapper logs warnings and returns `None` or empty results when rate-limited.
+
+3. **Batch requests where possible**: use Facebook batch API to group multiple sub-requests into one HTTP call for fetching ad details or insights. Update fetch_paid code accordingly.
+
+4. **Add caching logic**: before making an API call, check a local cache (e.g., a simple file or in-memory dict) to see if data for the requested entity and date range already exists. If so, return cached data. Add a “force_refresh” parameter for manual override.
+
+5. **Throttle loops**: where any loops over multiple IDs remain, insert a rate limiter or small sleeps to space out calls. Use Python’s `time.sleep()` or a `ratelimiter` decorator.
+
+6. **Graceful UI feedback**: in Streamlit dashboard code, detect when safe_api_call returns `None` or empty due to rate limit, and show a `st.warning("Rate limit reached; please wait and refresh later.")`. Display last successful fetch timestamp.
+
+7. **Monitor and log**: instrument each API call with logging of endpoint, params, response code, and error codes. Summarize in logs how many calls made per session.
+
+8. **Separate background sync**: add or modify a scheduled task (e.g., using threading.Timer or an external scheduler) that periodically fetches data in the background, storing into a local lightweight database (e.g., SQLite or DuckDB). Streamlit reads from this store, rather than making live API calls on each page load.
+
+9. **Optimize Instagram organic fetches** similarly: use metadata endpoint once per media type to get valid metrics, then fetch insights in bulk. Separate media-level vs account-level metrics. Batch or combine calls where supported.
+
+10. **Ensure dependencies & imports**: verify that `facebook_business` and other SDK imports are correct, and that any missing imports (e.g., `openai`) are added.
+
+11. **Update Graph API version** to the latest supported (e.g., v25.0) in all endpoints to leverage newest features and metrics.
+
+Please output the updated code snippets (e.g., safe_api_call wrapper, refactored fetch functions in fetch_paid.py and fetch_organic.py, and the Streamlit dashboard adjustments) ready for copy-paste into our codebase. Ensure the solution is production-ready and includes comments explaining each part.
