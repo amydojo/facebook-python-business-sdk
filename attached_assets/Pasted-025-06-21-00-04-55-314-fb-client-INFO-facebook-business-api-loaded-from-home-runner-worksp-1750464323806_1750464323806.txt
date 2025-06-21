@@ -1,0 +1,32 @@
+025-06-21 00:04:55,314 - fb_client - INFO - ✅ facebook_business.api loaded from: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/api.py
+2025-06-21 00:04:55,314 - fb_client - INFO - ✅ facebook_business.adobjects.adaccount loaded from: /home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/facebook_business/adobjects/adaccount.py
+2025-06-21 00:04:55,315 - fb_client - INFO - ✅ Facebook API initialized with app secret proof
+2025-06-21 00:04:55,315 - fb_client - INFO - ✅ Facebook SDK initialized for Ad Account: act_860378271946500
+2025-06-21 00:04:55,315 - fb_client - INFO - 🔍 Environment check - AD_ACCOUNT_ID: 860378271946500, ACCESS_TOKEN set: True
+2025-06-21 00:04:55,315 - fb_client - INFO - 🔍 APP_ID set: True, APP_SECRET set: True
+2025-06-21 00:04:55,315 - fb_client - INFO - ✅ FacebookAdsApi initialized with app secret proof
+2025-06-21 00:04:55,315 - fb_client - INFO - ✅ Facebook SDK initialized for Ad Account: act_860378271946500
+2025-06-21 00:04:55.318 Uncaught app exception
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 534, in _run_script
+    exec(code, module.__dict__)
+  File "/home/runner/workspace/dashboard.py", line 31, in <module>
+    logger.info("✅ Paid insights functions imported successfully")
+    ^^^^^^
+NameError: name 'logger' is not defined
+2025-06-21 00:04:55.319 Uncaught app exception
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 534, in _run_script
+    exec(code, module.__dict__)
+  File "/home/runner/workspace/dashboard.py", line 31, in <module>
+    logger.info("✅ Paid insights functions imported successfully")
+    ^^^^^^
+NameError: name 'logger' is not defined
+2025-06-21 00:04:55.618 Uncaught app exception
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/streamlit/runtime/scriptrunner/script_runner.py", line 534, in _run_script
+    exec(code, module.__dict__)
+  File "/home/runner/workspace/dashboard.py", line 31, in <module>
+    logger.info("✅ Paid insights functions imported successfully")
+    ^^^^^^
+NameError: name 'logger' is not defined
