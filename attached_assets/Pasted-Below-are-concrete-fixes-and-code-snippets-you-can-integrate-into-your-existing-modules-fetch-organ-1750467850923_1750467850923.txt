@@ -1,0 +1,912 @@
+Below are concrete fixes and code snippets you can integrate into your existing modules (fetch_organic.py, fetch_paid.py, api_helpers.py, fb_client.py, dashboard.py) to address the persistent errors:
+
+⸻
+
+1. Facebook Ads Insights: remove invalid status field and handle creative separately
+
+Issue
+
+The API errors:
+
+(#100) status is not valid for fields param. please check .../ads-insights/ for all valid values
+
+and similarly nested creative{...} inside insights fields cause 400s.
+
+Fix
+	1.	Define a valid list of insight fields for ads, excluding status and excluding nested creative{} in the same call.
+	2.	Fetch creative details in a separate step: after you obtain the insights DataFrame (which includes ad_id), batch-fetch creative metadata for those ads.
+
+Example patch in fetch_paid.py or wherever insights fields are assembled:
+
+# Instead of including 'status' or 'creative{...}' in the insights fields:
+VALID_AD_INSIGHTS_FIELDS = [
+    'ad_id',
+    'ad_name',
+    'adset_id',
+    'adset_name',
+    'campaign_id',
+    'campaign_name',
+    'impressions',
+    'clicks',
+    'spend',
+    'reach',
+    'frequency',
+    'ctr',
+    'cpc',
+    'cpm',
+    'unique_clicks',
+    'unique_link_clicks_ctr',
+    'cost_per_unique_click',
+    'date_start',
+    'date_stop',
+    # ...add other supported metric fields per latest docs...
+]
+
+def fetch_ads_insights(ad_account_id, date_preset='last_7d'):
+    from facebook_business.adobjects.adaccount import AdAccount
+    account = AdAccount(f'act_{ad_account_id}')
+    params = {
+        'level': 'ad',
+        'date_preset': date_preset,
+        'fields': ','.join(VALID_AD_INSIGHTS_FIELDS),
+    }
+    try:
+        insights = account.get_insights(params=params)
+        # Convert to list of dicts
+        records = [rec.export_all_data() if hasattr(rec, 'export_all_data') else rec for rec in insights]
+        # ...convert to DataFrame ...
+        return records
+    except Exception as e:
+        logger.warning(f"Failed to fetch ad insights: {e}")
+        return []
+
+Note: In the Facebook Business SDK, when you call account.get_insights(), each insights element is typically an instance with method export_all_data(). However, if your code sometimes treats it as a string or plain dict, ensure you are calling SDK methods correctly. For each record:
+
+for rec in insights:
+    data = rec.export_all_data()  # rec must be an SDK object, not a string ID
+
+If rec is unexpectedly a string, trace upstream to ensure get_insights() is called on the SDK AdAccount object, not on a string. If you previously did something like insights = some_string.get_insights(), fix that.
+
+Fetch creative metadata in batch
+
+After you have a DataFrame (or list of dicts) with ad_ids, do:
+
+def fetch_creatives_for_ads(ad_ids):
+    """
+    Given a list of ad IDs, batch-fetch their creative details in groups of e.g. 50.
+    Returns a dict: {ad_id: {creative fields...}, ...}
+    """
+    from facebook_business.api import FacebookAdsApi
+    from facebook_business.adobjects.ad import Ad
+
+    creatives_map = {}
+    BATCH_SIZE = 50
+    for i in range(0, len(ad_ids), BATCH_SIZE):
+        batch_ids = ad_ids[i:i + BATCH_SIZE]
+        # Use Graph API batch style via SDK: build one call string with ids param
+        ids_param = ','.join(batch_ids)
+        # Fields for creative object:
+        creative_fields = 'creative{body,title,image_url,thumbnail_url,object_url}'  # adjust fields as needed
+        try:
+            # For direct HTTP: GET /?ids=ad1,ad2,...&fields=creative{...}
+            from facebook_business.api import FacebookRequest
+            from facebook_business.adobjects.ad import Ad
+            # Alternatively, you can call via SDK helper:
+            # Example using Ad objects individually:
+            for ad_id in batch_ids:
+                ad_obj = Ad(ad_id)
+                try:
+                    creative_data = ad_obj.api_get(fields=['creative{body,title,image_url,thumbnail_url,object_url}'])
+                    creatives_map[ad_id] = creative_data.get('creative') or {}
+                except Exception as e:
+                    logger.warning(f"Failed fetching creative for ad {ad_id}: {e}")
+                    creatives_map[ad_id] = {}
+        except Exception as e:
+            logger.warning(f"Batch creative fetch error: {e}")
+            # As fallback, fetch individually
+            for ad_id in batch_ids:
+                ad_obj = Ad(ad_id)
+                try:
+                    creative_data = ad_obj.api_get(fields=['creative{body,title,image_url,thumbnail_url,object_url}'])
+                    creatives_map[ad_id] = creative_data.get('creative') or {}
+                except Exception as e2:
+                    logger.warning(f"Fallback: failed fetching creative for ad {ad_id}: {e2}")
+                    creatives_map[ad_id] = {}
+    return creatives_map
+
+# Then, after insights DataFrame:
+insights_records = fetch_ads_insights(AD_ACCOUNT_ID, date_preset='last_7d')
+df_insights = pd.DataFrame(insights_records)
+ad_ids = df_insights['ad_id'].astype(str).tolist()
+creatives_map = fetch_creatives_for_ads(ad_ids)
+# Merge creative fields into df_insights:
+df_insights['creative_body'] = df_insights['ad_id'].map(lambda aid: creatives_map.get(str(aid), {}).get('body'))
+df_insights['creative_title'] = df_insights['ad_id'].map(lambda aid: creatives_map.get(str(aid), {}).get('title'))
+# ...etc.
+
+	•	Remove any use of status in fields.
+	•	Ensure you import and instantiate SDK objects: e.g., from facebook_business.adobjects.ad import Ad, not passing strings into methods expecting objects.
+
+⸻
+
+2. Instagram Organic Insights: update curated metrics lists and robustly handle metadata failures
+
+Issue
+
+Metadata endpoint /v21.0/{media_id}/insights/metadata returns 400 because the requested metric list includes unsupported metrics like clips_replays_count, ig_reels_aggregated_all_plays_count, plays, etc.
+
+Fix
+	1.	Define a per-media-product curated list of only currently supported metrics (per latest Graph API docs for Instagram Media Insights v22+). Remove deprecated metrics.
+	2.	On metadata fetch failure, branch based on media_product_type (e.g. 'REEL', 'VIDEO', 'IMAGE', 'CAROUSEL_ALBUM') to choose curated list.
+	3.	Filter out unsupported metrics dynamically: if an insights call returns 400 for a specific metric, remove it and retry the rest.
+	4.	Ensure response handling expects a consistent type: if your helper sometimes returns a list instead of a Response-like object, fix it to always return a wrapper with .status_code and .json().
+
+Example curated lists
+
+# In fetch_organic.py:
+SUPPORTED_METRICS_BY_PRODUCT = {
+    "REEL": [
+        # Only include metrics documented as supported for Reels in latest API
+        "ig_reels_avg_watch_time",
+        "ig_reels_video_view_total_time",
+        "views",  # total plays/views
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        # "profile_visits" may or may not be supported; test dynamically
+        "follows",  # test dynamically
+        # Do NOT include: plays, clips_replays_count, ig_reels_aggregated_all_plays_count
+    ],
+    "VIDEO": [
+        "video_views",  # if supported on this product type
+        "impressions",
+        "reach",
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        "profile_visits",
+        "follows",
+        # Possibly "engagement" if available
+    ],
+    "IMAGE": [
+        "impressions",
+        "reach",
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        "profile_visits",
+        "follows",
+    ],
+    "CAROUSEL_ALBUM": [
+        "impressions",
+        "reach",
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        # profile visits / follows?
+        "profile_visits",
+        "follows",
+    ],
+    # Add others if needed
+}
+
+Example fetch_insights_for_media patch
+
+import time
+import requests
+
+def safe_api_call(url, params, headers=None, max_retries=3, backoff_factor=1.0):
+    """
+    Wrap requests.get with retries and backoff on 429/500-series.
+    Returns (status_code, json_body or None).
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            code = resp.status_code
+            if code == 200:
+                try:
+                    return 200, resp.json()
+                except ValueError:
+                    return 200, None
+            elif code in (429, 500, 502, 503, 504):
+                # backoff and retry
+                sleep = backoff_factor * (2 ** (attempt - 1))
+                logger.warning(f"Rate limit or server error {code} on {url}; backoff {sleep}s, attempt {attempt}")
+                time.sleep(sleep)
+                continue
+            else:
+                # For other errors, return immediately
+                try:
+                    error_body = resp.json()
+                except ValueError:
+                    error_body = resp.text
+                return code, error_body
+        except requests.RequestException as e:
+            sleep = backoff_factor * (2 ** (attempt - 1))
+            logger.warning(f"Request exception on {url}: {e}; backoff {sleep}s, attempt {attempt}")
+            time.sleep(sleep)
+    logger.error(f"Exceeded retries for {url}")
+    return None, None
+
+def fetch_insights_for_media(media, access_token):
+    """
+    media: dict with at least 'id', 'media_product_type' (e.g. 'REEL', 'IMAGE', etc.), maybe 'media_type'.
+    """
+    media_id = media.get('id')
+    product_type = media.get('media_product_type', '').upper()  # e.g. 'REEL'
+    # 1) Try metadata endpoint
+    metadata_url = f"https://graph.facebook.com/v23.0/{media_id}/insights/metadata"
+    params = {'access_token': access_token}
+    status, body = safe_api_call(metadata_url, params)
+    supported_metrics = None
+    if status == 200 and isinstance(body, dict) and 'data' in body:
+        # metadata returns a list of metric descriptors in body['data']
+        supported_metrics = [item.get('name') for item in body.get('data', []) if item.get('name')]
+        logger.info(f"Media {media_id}: metadata-supported metrics: {supported_metrics}")
+    else:
+        # metadata failed: fallback curated by media_product_type
+        curated = SUPPORTED_METRICS_BY_PRODUCT.get(product_type)
+        if curated:
+            supported_metrics = curated.copy()
+            logger.info(f"Media {media_id}: metadata unavailable, using curated metrics for {product_type}: {supported_metrics}")
+        else:
+            logger.warning(f"Media {media_id}: unknown product_type '{product_type}', cannot pick curated metrics.")
+            return None  # or empty
+    if not supported_metrics:
+        logger.warning(f"Media {media_id}: no supported metrics found.")
+        return None
+
+    # 2) Try fetching insights with the supported_metrics list, removing unsupported ones dynamically
+    insights_url = f"https://graph.facebook.com/v23.0/{media_id}/insights"
+    metrics_to_query = supported_metrics.copy()
+    result = {}
+    # We'll attempt in one call; if that fails with 400 specifying an unsupported metric, parse and retry removing it.
+    while metrics_to_query:
+        params = {
+            'metric': ','.join(metrics_to_query),
+            'access_token': access_token,
+        }
+        status, body = safe_api_call(insights_url, params)
+        if status == 200 and isinstance(body, dict) and 'data' in body:
+            # success: parse data
+            for entry in body['data']:
+                name = entry.get('name')
+                value = entry.get('values', [{}])[0].get('value')
+                result[name] = value
+            logger.info(f"Fetched insights for media {media_id}: {result.keys()}")
+            return result
+        elif status == 400 and isinstance(body, dict) and 'error' in body:
+            msg = body['error'].get('message', '')
+            # Parse which metric is unsupported, e.g. "(#100) metric[0] must be one of the following..."
+            # Try to extract metric name from msg; simpler: iterate through metrics_to_query and test individually removal
+            logger.warning(f"Media {media_id}: insights error: {msg}")
+            # Attempt to identify unsupported metric by testing each
+            removed_any = False
+            for metric in metrics_to_query.copy():
+                # Test single-metric call
+                test_params = {'metric': metric, 'access_token': access_token}
+                st, bd = safe_api_call(insights_url, test_params)
+                if st == 400:
+                    # unsupported metric; remove it
+                    logger.info(f"Removing unsupported metric '{metric}' for media {media_id}")
+                    metrics_to_query.remove(metric)
+                    removed_any = True
+                else:
+                    # metric seems ok; keep it
+                    pass
+            if not removed_any:
+                # Could not identify unsupported metric; abort
+                logger.warning(f"Media {media_id}: cannot identify unsupported metric among {metrics_to_query}; aborting insights fetch")
+                return None
+            # retry loop with reduced metrics_to_query
+        else:
+            # Other status (e.g., None or unexpected): abort
+            logger.warning(f"Media {media_id}: unexpected response fetching insights: status={status}, body={body}")
+            return None
+    # If loop exits without returning, no metrics left
+    logger.warning(f"Media {media_id}: no metrics left after removal; returning None")
+    return None
+
+	•	Key points:
+	•	Use safe_api_call to always return (status_code, body) or (None,None) on repeated failures.
+	•	If metadata fails (400), pick from SUPPORTED_METRICS_BY_PRODUCT based on media_product_type.
+	•	Remove deprecated metrics (plays, clips_replays_count, ig_reels_aggregated_all_plays_count) from curated lists.
+	•	Dynamically test each metric in case the API still rejects some in curated list.
+	•	Return a dict of metric -> value (or None if completely fails).
+	•	Ensure media.get('media_product_type') is available; if not, you may need to query /media?fields=media_product_type earlier.
+
+Ensure consistent response handling
+
+If your existing code sometimes returns a list instead of a Response-like object, refactor any wrapper so that:
+	•	safe_api_call always returns status, body.
+	•	Remove any code that checks resp.status_code when resp may be a list. Instead, always use status from safe_api_call.
+
+E.g., replace:
+
+resp = some_helper(...)
+body = resp.json() if hasattr(resp, 'json') else resp
+if resp.status_code == 200 and 'data' in body:
+    ...
+
+with:
+
+status, body = safe_api_call(...)
+if status == 200 and isinstance(body, dict) and 'data' in body:
+    ...
+
+
+⸻
+
+3. Fixing export_all_data errors in API helpers for Ads
+
+Issue
+
+ERROR:api_helpers:API call failed for ad_120215407805010683: 'str' object has no attribute 'export_all_data'
+
+This indicates somewhere code is calling .export_all_data() on a string instead of an SDK object.
+
+Fix
+	•	Audit places where you do something like:
+
+for ad in ads_list:
+    data = ad.export_all_data()
+
+Ensure ads_list contains SDK Ad objects, not raw IDs. For example, if you have:
+
+ad_ids = ['120215407805010683', ...]
+for ad_id in ad_ids:
+    data = ad_id.export_all_data()  # WRONG
+
+Instead:
+
+from facebook_business.adobjects.ad import Ad
+for ad_id in ad_ids:
+    ad_obj = Ad(ad_id)
+    try:
+        data = ad_obj.api_get(fields=[...])
+        # data is a dict
+    except Exception as e:
+        ...
+
+
+	•	If using Business SDK to fetch multiple ads:
+
+account = AdAccount(f'act_{AD_ACCOUNT_ID}')
+ads = account.get_ads(fields=[...])  # returns SDK objects
+for ad in ads:
+    rec = ad.export_all_data()  # OK, ad is SDK object
+
+But do not pass strings into loops expecting SDK instances.
+
+⸻
+
+4. fb_client.py: fix missing validate_credentials
+
+Issue
+
+ImportError: cannot import name 'validate_credentials' from 'fb_client'
+
+Your code refers to validate_credentials but fb_client.py does not define it.
+
+Fix
+	•	Either remove references to validate_credentials, or add a function in fb_client.py:
+
+# fb_client.py
+import os
+import logging
+from facebook_business.api import FacebookAdsApi
+from facebook_business.adobjects.adaccount import AdAccount
+
+logger = logging.getLogger(__name__)
+
+def init_facebook_client():
+    app_id = os.getenv('META_APP_ID')
+    app_secret = os.getenv('META_APP_SECRET')
+    access_token = os.getenv('META_ACCESS_TOKEN')  # or PAGE_ACCESS_TOKEN for organic
+    if not (app_id and app_secret and access_token):
+        logger.error("Missing Facebook credentials in environment")
+        raise ValueError("Missing Facebook credentials")
+    FacebookAdsApi.init(app_id, app_secret, access_token)
+    return True
+
+def validate_credentials():
+    """
+    Try a lightweight API call to verify credentials and account access.
+    """
+    try:
+        init_facebook_client()
+        ad_account_id = os.getenv('AD_ACCOUNT_ID')
+        if not ad_account_id:
+            logger.error("AD_ACCOUNT_ID not set")
+            return False
+        account = AdAccount(f'act_{ad_account_id}')
+        # fetch a minimal field to verify access
+        _ = account.api_get(fields=['id'])
+        return True
+    except Exception as e:
+        logger.error(f"Facebook credentials validation failed: {e}")
+        return False
+
+# Also expose any other helpers as needed
+
+	•	Update imports in your main code: ensure you call init_facebook_client() early, then validate_credentials().
+
+⸻
+
+5. Streamlit caching: avoid storing non-JSON-serializable objects
+
+Issue
+
+WARNING:api_helpers:Cache storage error: Object of type bytes is not JSON serializable
+
+Your @st.cache_data (or older @st.cache) is caching objects containing bytes. Need to cache only JSON-serializable dicts/lists/numbers/strings.
+
+Fix
+	•	Before returning from any cached function, convert binary data (e.g., images) into a URL or base64 string if necessary; or avoid caching raw bytes.
+	•	Example:
+
+@st.cache_data
+def fetch_and_process_insights(...):
+    # returns a dict/list of primitives only
+    data = {...}
+    # if you need to include an image: store the URL string, not raw bytes.
+    return data
+
+
+	•	If you have to cache a pandas DataFrame, you can return df.to_dict(orient='records') and later reconstruct DataFrame via pd.DataFrame(...) in the UI.
+
+⸻
+
+6. Streamlit Layout & OpenAI imports
+
+OpenAI import fix
+
+In dashboard.py or wherever you set openai.api_key, add at top:
+
+import os
+import openai  # ensure the module is imported
+openai.api_key = os.getenv('OPENAI_API_KEY')
+
+Ensure openai library is installed and imported before usage.
+
+Layout fix
+
+If you had errors about nesting columns too deep, restructure:
+	•	Avoid nesting st.columns() inside another st.columns() beyond one level. For example:
+
+cols = st.columns(2)
+with cols[0]:
+    st.write("Left")
+    # avoid creating another st.columns here; instead, inside this block, use rows or just elements.
+with cols[1]:
+    st.write("Right")
+    # if you need sub-columns, you can use st.columns inside the main, but limit nesting depth.
+
+
+
+⸻
+
+7. Putting it all together: sample integration steps
+	1.	In api_helpers.py: implement safe_api_call, centralize Graph API version (e.g., use GRAPH_API_VERSION = 'v23.0').
+	2.	In fetch_organic.py:
+	•	Replace direct requests with safe_api_call.
+	•	Use the SUPPORTED_METRICS_BY_PRODUCT curated map.
+	•	Ensure fetch_insights_for_media returns a dict of metric->value or None.
+	•	In the top-level fetch_ig_media_insights, collect these dicts into a list, build DataFrame, compute derived fields.
+	3.	In fetch_paid.py:
+	•	Adjust insights fields: use VALID_AD_INSIGHTS_FIELDS without status.
+	•	After fetching insights, call fetch_creatives_for_ads to merge creative info.
+	•	Fix any .export_all_data() usage to ensure the object is correct SDK object.
+	4.	In fb_client.py:
+	•	Add init_facebook_client() and validate_credentials().
+	•	Ensure environment variables are read.
+	5.	In dashboard.py:
+	•	Add import openai and set openai.api_key.
+	•	Wrap fetch calls in try/except and show user-friendly errors if returned data is empty or None.
+	•	Use Streamlit caching but ensure cached data is JSON-serializable.
+	•	Provide UI controls to let user retry if no data due to permission/token issues.
+	•	Avoid deep nested columns.
+
+⸻
+
+8. Example: Fixing Ads insights call in fetch_paid.py
+
+Below is a minimal example you can adapt:
+
+# fetch_paid.py
+import logging
+import pandas as pd
+from facebook_business.adobjects.adaccount import AdAccount
+from facebook_business.adobjects.ad import Ad
+from facebook_business.api import FacebookAdsApi
+import os
+
+logger = logging.getLogger(__name__)
+
+# Ensure credentials are initialized once
+def init_fb():
+    app_id = os.getenv('META_APP_ID')
+    app_secret = os.getenv('META_APP_SECRET')
+    access_token = os.getenv('META_ACCESS_TOKEN')
+    if not (app_id and app_secret and access_token):
+        raise ValueError("Missing Facebook credentials")
+    FacebookAdsApi.init(app_id, app_secret, access_token)
+
+VALID_AD_INSIGHTS_FIELDS = [
+    'ad_id',
+    'ad_name',
+    'adset_id',
+    'adset_name',
+    'campaign_id',
+    'campaign_name',
+    'impressions',
+    'clicks',
+    'spend',
+    'reach',
+    'frequency',
+    'ctr',
+    'cpc',
+    'cpm',
+    'unique_clicks',
+    'unique_link_clicks_ctr',
+    'cost_per_unique_click',
+    'date_start',
+    'date_stop',
+]
+
+def fetch_paid_insights(date_preset='last_7d'):
+    init_fb()
+    ad_account_id = os.getenv('AD_ACCOUNT_ID')
+    account = AdAccount(f'act_{ad_account_id}')
+    try:
+        insights_iter = account.get_insights(params={
+            'level': 'ad',
+            'date_preset': date_preset,
+            'fields': ','.join(VALID_AD_INSIGHTS_FIELDS),
+        })
+        records = []
+        for rec in insights_iter:
+            if hasattr(rec, 'export_all_data'):
+                data = rec.export_all_data()
+            else:
+                data = dict(rec)  # if it's already a dict-like
+            records.append(data)
+        if not records:
+            logger.warning("No ad insights returned")
+            return pd.DataFrame()
+        df = pd.DataFrame(records)
+    except Exception as e:
+        logger.error(f"Error fetching ad insights: {e}")
+        return pd.DataFrame()
+
+    # Fetch creatives
+    ad_ids = df['ad_id'].astype(str).tolist()
+    creatives_map = {}
+    for ad_id in ad_ids:
+        try:
+            ad_obj = Ad(ad_id)
+            creative_data = ad_obj.api_get(fields=['creative{body,title,image_url,thumbnail_url,object_url}'])
+            creatives_map[ad_id] = creative_data.get('creative') or {}
+        except Exception as e:
+            logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
+            creatives_map[ad_id] = {}
+    # Merge creative info
+    df['creative_body'] = df['ad_id'].map(lambda aid: creatives_map.get(str(aid), {}).get('body'))
+    df['creative_title'] = df['ad_id'].map(lambda aid: creatives_map.get(str(aid), {}).get('title'))
+    # etc.
+    return df
+
+	•	Remove any 'status' in fields.
+	•	Ensure init_fb() is called before any API calls.
+	•	Ensure Ad(ad_id) is an SDK Ad object; calling .api_get(...) returns a dict with creative nested.
+
+⸻
+
+9. Example: Fixing Instagram insights in fetch_organic.py
+
+# fetch_organic.py
+import logging
+import pandas as pd
+import requests
+import os
+import time
+
+logger = logging.getLogger(__name__)
+GRAPH_API_VERSION = 'v23.0'
+ACCESS_TOKEN = os.getenv('PAGE_ACCESS_TOKEN')  # or IG access token with proper scopes
+
+SUPPORTED_METRICS_BY_PRODUCT = {
+    "REEL": [
+        "ig_reels_avg_watch_time",
+        "ig_reels_video_view_total_time",
+        "views",
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        "profile_visits",  # test dynamically
+        "follows",         # test dynamically
+    ],
+    "VIDEO": [
+        "video_views",
+        "impressions",
+        "reach",
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        "profile_visits",
+        "follows",
+    ],
+    "IMAGE": [
+        "impressions",
+        "reach",
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        "profile_visits",
+        "follows",
+    ],
+    "CAROUSEL_ALBUM": [
+        "impressions",
+        "reach",
+        "likes",
+        "comments",
+        "shares",
+        "saved",
+        "profile_visits",
+        "follows",
+    ],
+}
+
+def safe_api_call(url, params, max_retries=3, backoff_factor=1.0):
+    for attempt in range(1, max_retries+1):
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            code = resp.status_code
+            if code == 200:
+                try:
+                    return 200, resp.json()
+                except ValueError:
+                    return 200, None
+            elif code in (429, 500, 502, 503, 504):
+                sleep_time = backoff_factor * (2 ** (attempt-1))
+                logger.warning(f"Rate-limit or server error {code} for {url}; sleeping {sleep_time}s")
+                time.sleep(sleep_time)
+                continue
+            else:
+                try:
+                    return code, resp.json()
+                except ValueError:
+                    return code, resp.text
+        except requests.RequestException as e:
+            sleep_time = backoff_factor * (2 ** (attempt-1))
+            logger.warning(f"RequestException for {url}: {e}; sleeping {sleep_time}s")
+            time.sleep(sleep_time)
+    logger.error(f"Failed safe_api_call for {url}")
+    return None, None
+
+def fetch_ig_media_list(ig_user_id, since=None, until=None):
+    """
+    Fetch media list for the IG user. Returns list of dicts with at least 'id', 'timestamp', 'media_type', 'media_product_type'.
+    """
+    media = []
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media"
+    params = {
+        'fields': 'id,caption,timestamp,media_type,media_product_type,media_url,permalink,thumbnail_url',
+        'access_token': ACCESS_TOKEN,
+        'limit': 100,
+    }
+    while True:
+        status, body = safe_api_call(url, params)
+        if status != 200 or not isinstance(body, dict) or 'data' not in body:
+            logger.warning(f"Failed fetching media list: status={status}, body={body}")
+            break
+        for item in body.get('data', []):
+            # Optionally filter by date range here
+            media.append(item)
+        paging = body.get('paging', {}).get('next')
+        if not paging:
+            break
+        url = paging  # full URL includes access_token
+        params = None
+    return media
+
+def fetch_insights_for_media(media):
+    media_id = media.get('id')
+    product_type = media.get('media_product_type', '').upper()
+    # 1) Try metadata
+    metadata_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights/metadata"
+    status, body = safe_api_call(metadata_url, {'access_token': ACCESS_TOKEN})
+    if status == 200 and isinstance(body, dict) and 'data' in body:
+        supported_metrics = [item.get('name') for item in body['data'] if item.get('name')]
+        logger.info(f"Media {media_id}: metadata metrics: {supported_metrics}")
+    else:
+        supported_metrics = SUPPORTED_METRICS_BY_PRODUCT.get(product_type, []).copy()
+        logger.info(f"Media {media_id}: metadata unavailable, using curated for {product_type}: {supported_metrics}")
+        if not supported_metrics:
+            logger.warning(f"No curated metrics for product_type {product_type}")
+            return None
+    # Remove any obviously invalid metrics up front if known deprecated
+    # Now fetch insights dynamically removing unsupported ones
+    insights_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights"
+    metrics_to_try = supported_metrics.copy()
+    result = {}
+    while metrics_to_try:
+        params = {'metric': ','.join(metrics_to_try), 'access_token': ACCESS_TOKEN}
+        status, body = safe_api_call(insights_url, params)
+        if status == 200 and isinstance(body, dict) and 'data' in body:
+            for entry in body['data']:
+                name = entry.get('name')
+                # Sometimes entry['values'] is a list of dicts; take first
+                vals = entry.get('values')
+                if isinstance(vals, list) and vals:
+                    value = vals[0].get('value')
+                else:
+                    value = None
+                result[name] = value
+            return result
+        elif status == 400 and isinstance(body, dict) and 'error' in body:
+            msg = body['error'].get('message', '')
+            logger.warning(f"Media {media_id}: insights 400: {msg}")
+            # Identify unsupported metric by testing individually
+            removed = False
+            for metric in metrics_to_try.copy():
+                st, bd = safe_api_call(insights_url, {'metric': metric, 'access_token': ACCESS_TOKEN})
+                if st == 400:
+                    logger.info(f"Removing unsupported metric '{metric}' for media {media_id}")
+                    metrics_to_try.remove(metric)
+                    removed = True
+            if not removed:
+                logger.warning(f"Cannot identify unsupported metric among {metrics_to_try} for media {media_id}")
+                return None
+            # retry with reduced metrics_to_try
+        else:
+            logger.warning(f"Media {media_id}: unexpected fetch insights response: status={status}, body={body}")
+            return None
+    logger.warning(f"Media {media_id}: no metrics left after removal")
+    return None
+
+def fetch_ig_media_insights(ig_user_id, since=None, until=None):
+    media_list = fetch_ig_media_list(ig_user_id, since, until)
+    records = []
+    for media in media_list:
+        data = fetch_insights_for_media(media)
+        if data:
+            record = {
+                'media_id': media.get('id'),
+                'timestamp': media.get('timestamp'),
+                'media_type': media.get('media_type'),
+                'media_product_type': media.get('media_product_type'),
+            }
+            record.update(data)
+            records.append(record)
+    if not records:
+        return pd.DataFrame()
+    df = pd.DataFrame(records)
+    # Optionally compute derived columns, e.g., engagement_rate = (likes+comments+shares)/follower_count
+    return df
+
+	•	Replace your existing logic in fetch_organic.py with the above pattern.
+	•	Ensure you import requests and time, and that ACCESS_TOKEN has the right scopes: instagram_basic, instagram_manage_insights, pages_read_engagement, etc.
+	•	Confirm media.get('media_product_type') matches uppercase keys in SUPPORTED_METRICS_BY_PRODUCT. Adjust keys if actual values differ (e.g., sometimes 'REEL_VIDEO' or similar; log the product_type values you see and adjust the dict accordingly).
+
+⸻
+
+10. General rate-limit and caching improvements in api_helpers.py
+	•	Implement safe_api_call as above, and replace all direct requests.get or SDK calls that may raise exceptions with wrappers that catch and retry rate-limit errors.
+	•	Cache only serializable data: if using Streamlit’s @st.cache_data, ensure functions return dict/list/primitive. For pandas DataFrame, return df.to_dict('records'), then reconstruct DataFrame in UI.
+	•	Log call counts: maintain a simple counter in memory or log each API call in safe_api_call.
+
+API_CALL_COUNT = 0
+
+def safe_api_call(...):
+    global API_CALL_COUNT
+    API_CALL_COUNT += 1
+    # log API_CALL_COUNT periodically if desired
+    ...
+
+	•	On HTTP 17 (rate-limit) errors from Facebook Ads API, implement exponential backoff or pause loop:
+
+if 'User request limit reached' in msg or code == 17:
+    sleep_time = 60  # or exponential
+    logger.warning(f"Rate limit reached, sleeping {sleep_time}s")
+    time.sleep(sleep_time)
+    continue
+
+
+
+⸻
+
+11. Putting it in your Streamlit dashboard (dashboard.py)
+	•	In your top-level, import and use the above functions:
+
+import openai
+openai.api_key = os.getenv('OPENAI_API_KEY')
+
+import fetch_organic, fetch_paid
+import pandas as pd
+import streamlit as st
+
+st.title("Enhanced Instagram & Ads Analytics Dashboard")
+
+# Example: Instagram insights
+ig_user_id = os.getenv('IG_USER_ID')
+if ig_user_id:
+    try:
+        df_ig = fetch_organic.fetch_ig_media_insights(ig_user_id)
+        if df_ig.empty:
+            st.warning("No Instagram insights returned. Check token scopes, account linkage, date filter.")
+        else:
+            st.dataframe(df_ig)  # or plot metrics via matplotlib
+    except Exception as e:
+        st.error(f"Error fetching Instagram insights: {e}")
+else:
+    st.error("IG_USER_ID not configured")
+
+# Example: Ads insights
+ad_account_id = os.getenv('AD_ACCOUNT_ID')
+if ad_account_id:
+    try:
+        df_ads = fetch_paid.fetch_paid_insights(date_preset='last_7d')
+        if df_ads.empty:
+            st.warning("No Ads insights returned. Check credentials and valid Ad Account.")
+        else:
+            st.dataframe(df_ads)
+    except Exception as e:
+        st.error(f"Error fetching Ads insights: {e}")
+else:
+    st.error("AD_ACCOUNT_ID not configured")
+
+
+	•	Avoid nested columns too deep: if you need side-by-side panels, use at most one level of st.columns([...]).
+	•	Cache data if desired, but ensure returned values are serializable:
+
+@st.cache_data(ttl=300)
+def get_ig_insights_cached(ig_user_id):
+    df = fetch_organic.fetch_ig_media_insights(ig_user_id)
+    # Return df.to_dict('records')
+    return df.to_dict('records')
+# In UI:
+records = get_ig_insights_cached(ig_user_id)
+df_ig = pd.DataFrame(records)
+st.dataframe(df_ig)
+
+
+
+⸻
+
+12. Testing & Validation
+	1.	Instagram:
+	•	Run fetch_ig_media_insights on a known reel/media. Log what media_product_type comes back (e.g., log unique values) and adjust SUPPORTED_METRICS_BY_PRODUCT keys accordingly.
+	•	Verify supported metrics appear and unsupported ones are skipped gracefully.
+	•	If metadata occasionally returns a list you cannot parse, ensure safe_api_call returns consistent structure.
+	2.	Ads:
+	•	Run fetch_paid_insights and confirm no 400 errors for status or nested creative{}. Verify creative info is merged.
+	•	Check export_all_data() calls no longer run on strings.
+	3.	Overall:
+	•	Ensure environment variables (PAGE_ACCESS_TOKEN, AD_ACCOUNT_ID, IG_USER_ID, META_APP_ID, META_APP_SECRET, OPENAI_API_KEY) are set correctly.
+	•	Check logs to confirm that unsupported metrics are removed automatically.
+	•	Confirm caching works without serialization errors.
+
+⸻
+
+Summary
+	•	Remove status from Ads insights fields; fetch creative separately.
+	•	Curate Instagram metrics per media_product_type, removing deprecated ones (plays, clips_replays_count, etc.).
+	•	Use safe_api_call for consistent (status, body) handling and retries.
+	•	Fix .export_all_data() usage: ensure SDK objects, not strings.
+	•	Add missing validate_credentials in fb_client.py, or remove its references.
+	•	Import openai properly.
+	•	Cache only JSON-serializable data in Streamlit.
+	•	Adjust layout to avoid deep-nesting of columns.
+
+⸻
+
+By integrating these patches/snippets into your codebase, you should eliminate the 400 errors for invalid fields/metrics and make your dashboard robust against API changes. Copy the snippets into the corresponding modules, adapt variable names and imports as needed, and test end-to-end. If further errors arise, inspect logs to adjust curated lists or field names to match the latest Graph API documentation.
