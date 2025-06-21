@@ -1,0 +1,530 @@
+The root issues in your logs boil down to a few patterns:
+	1.	Assuming resp is an HTTP response object (with .status_code) when in fact your helper returns a parsed JSON (often a dict or list).
+	2.	Iterating over SDK “edges” but encountering plain strings or dicts rather than objects with .export_all_data().
+	3.	Requesting invalid insight fields (e.g. "status", or nested creative{...} in ad insights), causing 400 errors.
+	4.	Streamlit cache misuse: treating cached-returned data as if it were a response object.
+	5.	Fallback metric loops sometimes yield lists of metrics, but you treat responses incorrectly.
+
+Below are targeted explanations and patches for the common functions—especially in fetch_organic.py’s fetch_insights_for_media (or fetch_ig_media_insights) and in fetch_paid.py’s ad-insights logic—so that they handle the actual return types, filter out invalid fields, and avoid attribute errors. Apply these patches (adapt paths/names as needed) to fix the errors shown.
+
+⸻
+
+1. Fixing fetch_insights_for_media / fetch_ig_media_insights in fetch_organic.py
+
+Problem
+
+Your code likely does something like:
+
+resp = http_get(url, params)
+body = resp.json()  # or safe_api_call returns body directly
+if resp.status_code == 200 and "data" in body:
+    data = body["data"]
+    ...
+
+But your helper (e.g. http_get or api_helpers.paginate_get) returns a Python dict or list, not an HTTP response object. Hence resp is a dict or list, so resp.status_code fails. Later, when paginating or caching, you may get body as a list.
+
+Patch
+	•	Remove any checks like if resp.status_code == 200. Instead, check the type of the returned value.
+	•	If your helper returns a dict with a "data" key, extract that; if it returns a list, treat that as the data list directly.
+	•	Always guard by isinstance.
+
+Example patch for fetch_insights_for_media(media) (simplified sketch):
+
+def fetch_insights_for_media(media_id: str, since: str, until: str, metrics: list[str]) -> list[dict]:
+    """
+    Fetch IG media insights for a single media item.
+    Returns a list of insight records (each a dict), or empty list.
+    """
+    # Build URL: e.g. f"https://graph.facebook.com/{API_VERSION}/{media_id}/insights"
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights"
+    params = {
+        "metric": ",".join(metrics),
+        "since": since,
+        "until": until,
+        # include access_token etc.
+        "access_token": os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN"),
+    }
+    try:
+        # Use your helper: this may return a dict with 'data' and optional paging
+        result = api_helpers.http_get(url, params)
+    except Exception as e:
+        logger.warning("Media %s: insights fetch failed: %s", media_id, e)
+        return []
+
+    # Normalize result into a list of records
+    records: list[dict] = []
+    if isinstance(result, dict):
+        if "data" in result and isinstance(result["data"], list):
+            records = result["data"]
+        else:
+            # Unexpected dict shape; maybe the entire dict is a single record?
+            # But IG insights always return {"data":[...], "paging":...} or error.
+            logger.debug("Media %s: Unexpected result shape (dict without 'data'): %r", media_id, result)
+            # No records
+            records = []
+    elif isinstance(result, list):
+        # In case your helper paginated already and returned a list
+        records = result
+    else:
+        # Neither dict nor list
+        logger.debug("Media %s: Unexpected result type: %s", media_id, type(result))
+        records = []
+
+    # Now records is list[dict]. You can further process each record: e.g.
+    # Each record might be {"name": metric_name, "values": [...]} etc.
+    # Return as-is, or flatten to long format here.
+
+    # Example: if you want to flatten per timestamp:
+    flat = []
+    for rec in records:
+        # rec might have 'name', 'values' where values is list of {value:..., end_time:...}
+        name = rec.get("name") or rec.get("metric") or rec.get("metric_name")
+        values_list = rec.get("values") or []
+        for v in values_list:
+            # v might be {"value": X, "end_time": "YYYY-MM-DDThh:mm:ss+0000"}
+            val = v.get("value")
+            timestamp = v.get("end_time") or v.get("period") or None
+            flat.append({
+                "media_id": media_id,
+                "metric": name,
+                "value": val,
+                "timestamp": timestamp,
+            })
+    return flat
+
+Key changes:
+	•	No resp.status_code checks.
+	•	Normalize result (dict with "data" or list) into a records list.
+	•	Flatten into long format here (if desired). The returned flat list is safe to concatenate across media.
+
+In your fetch_ig_media_insights wrapper, ensure when no metrics or fetch fails you return [] or pd.DataFrame([], columns=[...]).
+
+If you’re caching with Streamlit’s @st.cache_data, remember the function should return a plain Python object (list/dict/pd.DataFrame), not an HTTP response.
+
+⸻
+
+2. Handling “list object has no attribute ‘status_code’” in Streamlit cache
+
+Anywhere you see code like:
+
+resp = some_fetch(...)
+body = resp.json()  # or resp is already JSON
+if resp.status_code == 200:
+    ...
+
+Replace with:
+
+result = some_fetch(...)  # returns dict or list
+# no status_code check
+if isinstance(result, dict) and "data" in result:
+    data = result["data"]
+elif isinstance(result, list):
+    data = result
+else:
+    data = []
+
+Then proceed. That removes the AttributeError.
+
+⸻
+
+3. Fixing fetch_ad_insights_fields in fetch_paid.py
+
+Problem A: 'str' object has no attribute 'export_all_data'
+
+Your code likely does:
+
+edges = account.get_insights(params=insight_params)
+for edge in edges:
+    results.append(edge.export_all_data())
+
+But sometimes edge is not an SDK object but a plain dict or even a string (e.g., if caching returned a serialized string). To be robust:
+
+results = []
+for edge in edges:
+    # If SDK object:
+    if hasattr(edge, "export_all_data"):
+        try:
+            results.append(edge.export_all_data())
+        except Exception as e:
+            logger.warning("Failed export_all_data for edge %r: %s", edge, e)
+    elif isinstance(edge, dict):
+        results.append(edge)
+    else:
+        logger.warning("Skipping unexpected edge type %s: %r", type(edge), edge)
+
+Problem B: Invalid fields in ad insights
+
+Your logs show 400 errors: (status is not valid for fields param), (creative is not valid). You need to build the list of valid insight fields per the API version.
+	•	Remove invalid fields like "status". Only include fields documented at https://developers.facebook.com/docs/marketing-api/reference/ads-insights/
+	•	For creative details, you cannot request nested creative{...} in the same call. Instead, first fetch insights with metrics/fields, then separately fetch creative info per ad ID using Ad endpoint:
+
+# After fetching insights rows, collect distinct ad_ids; then for each:
+ad = Ad(ad_id)
+creative = ad.get_ad_creatives(fields=[...])  # with proper fields
+
+Or use batch calls.
+
+Example patch snippet:
+
+VALID_AD_INSIGHT_FIELDS = {
+    "ad_id","ad_name","adset_id","adset_name","campaign_id","campaign_name",
+    "impressions","clicks","spend","reach","frequency","ctr","cpc","cpm",
+    "unique_clicks","unique_link_clicks","cost_per_unique_click","date_start","date_stop"
+    # etc: consult the API docs for allowed fields in insights call
+}
+def fetch_ad_insights_fields(account_id: str, level: str, fields: list[str], date_preset: str, since=None, until=None):
+    # Filter fields:
+    filtered = [f for f in fields if f in VALID_AD_INSIGHT_FIELDS]
+    invalid = set(fields) - set(filtered)
+    if invalid:
+        logger.warning("Removed invalid insight fields for account %s: %s", account_id, invalid)
+    if not filtered:
+        return []
+    insight_params = {"level": level, "fields": ",".join(filtered)}
+    if date_preset:
+        insight_params["date_preset"] = date_preset
+    if since and until:
+        insight_params["time_range"] = {"since": since, "until": until}
+    # SDK fetch, wrapped:
+    try:
+        edges = sdk_call_with_backoff(account.get_insights, params=insight_params)
+        results = []
+        for edge in edges:
+            if hasattr(edge, "export_all_data"):
+                results.append(edge.export_all_data())
+            elif isinstance(edge, dict):
+                results.append(edge)
+            else:
+                logger.debug("Skipping unexpected insight edge: %r", edge)
+        return results
+    except Exception as e:
+        logger.error("fetch_ad_insights_fields SDK fetch failed: %s", e)
+        return []
+
+Then, separately fetch creative details:
+
+def fetch_creative_for_ad(ad_id: str) -> dict:
+    from facebook_business.adobjects.ad import Ad
+    try:
+        ad = Ad(ad_id)
+        creatives = sdk_call_with_backoff(ad.get_ad_creatives, fields=[
+            "id","name","body","title","image_url","thumbnail_url","object_url"
+        ])
+        # creatives is a cursor; flatten:
+        result = []
+        for c in creatives:
+            if hasattr(c, "export_all_data"):
+                result.append(c.export_all_data())
+            elif isinstance(c, dict):
+                result.append(c)
+        return result
+    except Exception as e:
+        logger.warning("Failed to fetch creative for ad %s: %s", ad_id, e)
+        return {}
+
+Integrate in your dashboard: after obtaining insight rows, join on ad_id to creative info.
+
+⸻
+
+4. Filtering IG metrics for Reels / Organic insights
+
+Your logs show fallback metrics and many removals. The Graph API returns valid metrics per media type. To avoid repeated trial-and-error loops:
+	•	Fetch metadata once per media type (if available): Graph endpoint /{media_id}/insights/metadata returns supported metrics; but your logs show metadata fetch error because API version or endpoint mismatch.
+	•	If metadata fetch fails, maintain a curated list of metrics per media_type or media_product_type: e.g., for reels:
+
+REEL_INSIGHTS_METRICS = [
+  "plays",
+  "ig_reels_video_view_total_time",
+  "ig_reels_avg_watch_time",
+  "clips_replays_count",
+  "ig_reels_aggregated_all_plays_count",
+  "views",
+  "likes","comments","shares","saved","profile_visits","follows"
+  # etc: from docs: impressions, reach may or may not apply
+]
+
+
+	•	Before calling, filter to only metrics known valid for that type. You can maintain a mapping:
+
+METRICS_BY_TYPE = {
+  "VIDEO": ["video_views","plays","total_interactions", ...],
+  "IMAGE": ["impressions","reach","engagements", ...],
+  "CAROUSEL": [...],
+  "REELS": [ ... ],
+  # etc.
+}
+
+
+	•	Use that mapping rather than blind fallback lists. This reduces trial-and-error loops.
+
+Example:
+
+def get_valid_ig_metrics_for_media(media_type: str, media_product_type: str) -> list[str]:
+    # E.g. media_type: "VIDEO", media_product_type: "REELS"
+    if media_product_type == "REELS":
+        return ["plays","ig_reels_video_view_total_time","ig_reels_avg_watch_time","views","likes","comments","shares","saved","follows","profile_visits"]
+    if media_type == "VIDEO":
+        return ["video_views","total_interactions","likes","comments","shares","saved"]
+    if media_type == "IMAGE":
+        return ["impressions","reach","engagement","likes","comments","shares","saved"]
+    # fallback:
+    return ["impressions","reach","total_interactions"]
+
+Then in fetch_insights_for_media, do:
+
+media_type = media.get("media_type")  # from your media list fetch
+media_product_type = media.get("media_product_type")
+metrics = get_valid_ig_metrics_for_media(media_type, media_product_type)
+records = fetch_insights_for_media(media_id, since, until, metrics)
+
+This avoids endless remove/retry loops.
+
+⸻
+
+5. Streamlit caching errors
+
+The error:
+
+Instagram fetch error: 'list' object has no attribute 'status_code'
+
+Happened inside:
+
+df = cached_fetch_ig_media_insights(ig_user_id, since_str, until_str)
+# inside fetch_ig_media_insights:
+resp = fetch_insights_for_media(media)
+if resp.status_code == 200:  # <- wrong
+
+Remove that check. Also ensure that cached_fetch_ig_media_insights returns a DataFrame or list/dict, not a response object.
+
+If using @st.cache_data, signature should return a pandas DataFrame:
+
+@st.cache_data
+def cached_fetch_ig_media_insights(ig_user_id: str, since: str, until: str) -> pd.DataFrame:
+    records = []
+    media_list = fetch_media_list(ig_user_id, since, until)
+    for media in media_list:
+        recs = fetch_insights_for_media(media["id"], since, until, metrics_for(media))
+        records.extend(recs)
+    if not records:
+        return pd.DataFrame([], columns=["media_id","metric","value","timestamp"])
+    return pd.DataFrame(records)
+
+No .status_code checks needed.
+
+⸻
+
+6. Overall Checklist & Next Steps
+	1.	Patch fetch_insights_for_media:
+	•	Remove .status_code checks.
+	•	Normalize helper return to dict or list.
+	•	Flatten into long format early.
+	•	Return list of dicts or DataFrame-ready list.
+	2.	Patch fetch_ig_media_insights wrapper:
+	•	If metrics list empty or fetch fails, return empty list or empty DataFrame.
+	•	Use curated metric lists per media type to avoid invalid metrics loops.
+	•	Return long format directly so dashboard code can pd.DataFrame(...).
+	3.	Patch fetch_ad_insights_fields:
+	•	Filter out invalid insight fields before request.
+	•	Handle SDK edge items robustly: check for .export_all_data, dict, else skip.
+	•	For creative details, fetch separately rather than nested creative{} in insights call.
+	4.	Review caching layers:
+	•	Streamlit cache: ensure cached functions return plain Python objects (DataFrame or list/dict), not response objects.
+	•	Do not assume attributes like .status_code on cached return.
+	•	Surround caching logic in try/except so that cache misses don’t crash.
+	5.	Logging:
+	•	In removal loops, log which metric was invalid and finalize the valid set quickly rather than blind trial loops.
+	•	For ad insights: log invalid fields removed.
+	•	For media insights: if metadata fetch fails, log once and fallback to curated mapping.
+	6.	Validate environment and tokens:
+	•	Ensure your access token has correct permissions (instagram_basic, instagram_manage_insights).
+	•	If metadata endpoint returns 400, confirm Graph API version supports it; update to latest version in GRAPH_API_VERSION and check docs.
+	7.	Test after patch:
+	•	Add debug prints or logs at function entry showing the type of result from helper.
+	•	Write a small standalone script to call fetch_insights_for_media on a known media ID and print the returned list structure.
+	•	For paid insights, test with minimal valid fields list to confirm no 400.
+
+⸻
+
+7. Example Patch Snippets
+
+Below are more complete snippet examples. Insert or adapt into your modules:
+
+In fetch_organic.py:
+
+import os, logging
+import pandas as pd
+from api_helpers import http_get  # or your helper
+# Ensure GRAPH_API_VERSION is imported or configured
+
+def get_valid_ig_metrics_for_media(media_type: str, media_product_type: str) -> list[str]:
+    # curate based on documentation
+    if media_product_type and media_product_type.upper() == "REELS":
+        return ["plays","ig_reels_video_view_total_time","ig_reels_avg_watch_time","views","likes","comments","shares","saved","follows","profile_visits"]
+    if media_type and media_type.upper() == "VIDEO":
+        return ["video_views","total_interactions","likes","comments","shares","saved"]
+    if media_type and media_type.upper() == "IMAGE":
+        return ["impressions","reach","total_interactions","likes","comments","shares","saved"]
+    # fallback
+    return ["impressions","reach","total_interactions"]
+
+def fetch_insights_for_media(media_id: str, since: str, until: str, metrics: list[str]) -> list[dict]:
+    """
+    Returns list of flattened insight records: [{media_id, metric, value, timestamp}, ...]
+    """
+    if not metrics:
+        return []
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights"
+    params = {
+        "metric": ",".join(metrics),
+        "since": since,
+        "until": until,
+        "access_token": os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN"),
+    }
+    try:
+        result = http_get(url, params)
+    except Exception as e:
+        logging.warning("Media %s: insights fetch failed: %s", media_id, e)
+        return []
+
+    # Normalize to list of dicts
+    items: list[dict]
+    if isinstance(result, dict):
+        items = result.get("data") if isinstance(result.get("data"), list) else []
+    elif isinstance(result, list):
+        items = result
+    else:
+        logging.debug("Media %s: unexpected result type %s", media_id, type(result))
+        items = []
+
+    flattened = []
+    for rec in items:
+        name = rec.get("name") or rec.get("metric") or rec.get("metric_name")
+        values_list = rec.get("values") or []
+        for v in values_list:
+            # Some metrics return an integer or dict
+            if isinstance(v, dict):
+                val = v.get("value")
+                timestamp = v.get("end_time") or v.get("period") or None
+            else:
+                val = v
+                timestamp = None
+            flattened.append({
+                "media_id": media_id,
+                "metric": name,
+                "value": val,
+                "timestamp": timestamp,
+            })
+    return flattened
+
+@st.cache_data
+def cached_fetch_ig_media_insights(ig_user_id: str, since: str, until: str) -> pd.DataFrame:
+    # First fetch media list (ensure that function returns list of dict with keys including id, media_type, media_product_type, timestamp etc.)
+    media_list = fetch_media_list(ig_user_id, since, until)  # your existing function
+    all_records = []
+    for media in media_list:
+        media_id = media.get("id")
+        media_type = media.get("media_type")
+        media_product_type = media.get("media_product_type")
+        metrics = get_valid_ig_metrics_for_media(media_type, media_product_type)
+        recs = fetch_insights_for_media(media_id, since, until, metrics)
+        all_records.extend(recs)
+    if not all_records:
+        return pd.DataFrame([], columns=["media_id","metric","value","timestamp"])
+    return pd.DataFrame(all_records)
+
+In fetch_paid.py:
+
+import os, logging
+from api_helpers import sdk_call_with_backoff
+from facebook_business.adobjects.adaccount import AdAccount
+from facebook_business.adobjects.ad import Ad
+
+VALID_AD_INSIGHT_FIELDS = {
+    "ad_id","ad_name","adset_id","adset_name","campaign_id","campaign_name",
+    "impressions","clicks","spend","reach","frequency","ctr","cpc","cpm",
+    "unique_clicks","unique_link_clicks","cost_per_unique_click","date_start","date_stop"
+    # extend per docs
+}
+
+def fetch_ad_insights_fields(account_id: str, level: str, fields: list[str], date_preset: str=None, since: str=None, until: str=None) -> list[dict]:
+    filtered = [f for f in fields if f in VALID_AD_INSIGHT_FIELDS]
+    invalid = set(fields) - set(filtered)
+    if invalid:
+        logging.warning("Removed invalid insight fields: %s", invalid)
+    if not filtered:
+        return []
+    account = AdAccount(f"act_{account_id}")
+    insight_params = {"level": level, "fields": ",".join(filtered)}
+    if date_preset:
+        insight_params["date_preset"] = date_preset
+    if since and until:
+        insight_params["time_range"] = {"since": since, "until": until}
+    try:
+        edges = sdk_call_with_backoff(account.get_insights, params=insight_params)
+    except Exception as e:
+        logging.error("fetch_ad_insights_fields failed for account %s: %s", account_id, e)
+        return []
+    results = []
+    for edge in edges or []:
+        if hasattr(edge, "export_all_data"):
+            try:
+                results.append(edge.export_all_data())
+            except Exception as e:
+                logging.warning("export_all_data failed: %s", e)
+        elif isinstance(edge, dict):
+            results.append(edge)
+        else:
+            logging.debug("Skipping unexpected insight edge type %s", type(edge))
+    return results
+
+def fetch_creative_for_ad(ad_id: str) -> list[dict]:
+    try:
+        ad = Ad(ad_id)
+        creatives = sdk_call_with_backoff(ad.get_ad_creatives, fields=[
+            "id","name","body","title","image_url","thumbnail_url","object_url"
+        ])
+        result = []
+        for c in creatives or []:
+            if hasattr(c, "export_all_data"):
+                try:
+                    result.append(c.export_all_data())
+                except Exception as e:
+                    logging.warning("creative export_all_data failed for ad %s: %s", ad_id, e)
+            elif isinstance(c, dict):
+                result.append(c)
+            else:
+                logging.debug("Skipping creative of unexpected type %s", type(c))
+        return result
+    except Exception as e:
+        logging.warning("Failed to fetch creative for ad %s: %s", ad_id, e)
+        return []
+
+In dashboard.py or main
+	•	Remove any .status_code checks on fetch results.
+	•	After getting DataFrame from cached_fetch, check if empty before rendering.
+	•	When joining insights with creative info, handle empty lists gracefully.
+	•	Surround API calls with try/except to log and continue, so one failure doesn’t crash the UI.
+
+⸻
+
+8. Handling invalid fields dynamically
+
+If you want dynamic validation of insight fields, you can fetch the insights metadata endpoint for ad insights (if available), parse the allowed fields, and filter. But static VALID_AD_INSIGHT_FIELDS updated per Graph API docs is simpler.
+
+⸻
+
+9. Testing
+	•	Write small unit tests / standalone scripts calling fetch_insights_for_media for a known IG media ID, printing the returned list/dict structure.
+	•	Similarly test fetch_ad_insights_fields with minimal fields on a small ad account.
+	•	Confirm no more AttributeErrors.
+
+⸻
+
+10. Summary of “What’s wrong”
+	1.	AttributeError: you’re treating JSON-returned data (list/dict) as HTTP response (.status_code). Remove those checks and inspect actual types.
+	2.	Export errors: SDK edges sometimes come back as dict or string; guard with hasattr(..., 'export_all_data') and fallback for dict.
+	3.	Invalid fields: remove fields not allowed by the API to avoid 400 errors (e.g., "status" in ad insights, nested creative fields).
+	4.	Caching: Streamlit cache returns plain objects; code must not assume response objects. Ensure cached functions return DataFrame/list/dict.
+	5.	Metric loops: avoid blind trial-and-error loops; use curated metric lists per media type to reduce unsupported-metric errors.
+
+Apply the snippet patches above into your codebase, re-run, and the errors (e.g. 'list' object has no attribute 'status_code', 'str' object has no attribute 'export_all_data', 400 invalid fields) should vanish. Let me know if you need further tweaks!
