@@ -1,0 +1,65 @@
+You are a senior Python engineer and codebase integrator. Patch our Streamlit app so that all paid-insights imports and calls align with the actual functions defined in fetch_paid.py. Specifically:
+
+1. **Detect the correct function names in fetch_paid.py**  
+   - Open `fetch_paid.py` and list all top-level function definitions related to paid/ads insights (e.g., `fetch_ad_insights`, `get_campaign_performance`, `get_campaign_performance_with_creatives`, etc.).  
+   - Identify which function returns the paid campaign DataFrame suitable for dashboard consumption. For instance, if there is `get_campaign_performance(...)` or `fetch_ad_insights(...)`, that is what dashboard should call.
+
+2. **Update dashboard.py imports**  
+   - Search for lines like `from fetch_paid import get_paid_insights`. Remove or replace them.  
+   - Instead, import the correct function(s). For example, if `get_campaign_performance` is the intended entrypoint, change to:
+     ```python
+     from fetch_paid import get_campaign_performance
+     ```
+   - If the code elsewhere expects a generic “paid insights” function, you can add at the bottom of `fetch_paid.py` a small alias:
+     ```python
+     # Alias for backward compatibility
+     def get_paid_insights(*args, **kwargs):
+         return get_campaign_performance(*args, **kwargs)
+     ```
+     so that dashboard can continue using `get_paid_insights` if preferred. But better is to update dashboard to call the real function name.
+
+3. **Update usage in dashboard.py**  
+   - Find where `get_paid_insights(...)` was called. Replace with the correct function signature. For example:
+     ```python
+     # Old:
+     paid_data = get_paid_insights(date_preset=date_preset)
+     # New:
+     paid_data = get_campaign_performance(date_preset=date_preset)
+     ```
+   - If additional parameters or return formats differ, ensure the dashboard handles the returned DataFrame or data structure. Update column names or handling logic accordingly.
+
+4. **Add import checks and fallback**  
+   - In `dashboard.py`, wrap imports in try/except to give a clear error if the function isn’t found:
+     ```python
+     try:
+         from fetch_paid import get_campaign_performance
+     except ImportError as e:
+         st.error(f"fetch_paid function import error: {e}. Please ensure fetch_paid.py defines get_campaign_performance.")
+         st.stop()
+     ```
+   - Remove any stale references to `get_paid_insights` elsewhere (including comments or UI code).
+
+5. **Validate fetch_paid.py exports**  
+   - At the top of `fetch_paid.py`, ensure the intended functions are not nested inside `if __name__` blocks. They must be at module level so imports work.  
+   - If there is a function named `fetch_ad_insights` that is lower-level, but a higher-level wrapper like `get_campaign_performance` exists, prefer the wrapper. If no wrapper exists, create one:
+     ```python
+     def get_campaign_performance(...):
+         # existing logic or call fetch_ad_insights
+         return fetch_ad_insights(...)
+     ```
+   - Ensure `fetch_paid.py` has no syntax errors that prevent imports (e.g., unmatched braces). Run a quick import test.
+
+6. **Test after patch**  
+   - After updating imports and aliases, restart Streamlit and confirm that the import error is gone.  
+   - Call the paid-insights section in the UI and verify data appears as expected.
+
+7. **General cleanup**  
+   - Remove leftover debug prints in fetch_paid (like unmatched f-strings) that previously caused syntax errors.  
+   - Add logging in fetch_paid to confirm which function is being called.  
+   - Ensure environment variables (AD_ACCOUNT_ID, ACCESS_TOKEN, APP_ID/SECRET) checks remain in place before invoking paid-insights.
+
+8. **Return patched code snippets**  
+   - Output the diff or full updated `dashboard.py` import section and any new alias in `fetch_paid.py`.  
+   - Provide example usage in dashboard (e.g. how to call `get_campaign_performance`) and sample code to handle its DataFrame.
+
+By running this prompt, the AI agent will align your dashboard’s imports/calls with the actual functions in fetch_paid.py, eliminating the `ImportError: cannot import name 'get_paid_insights'` and ensuring paid insights load correctly.
