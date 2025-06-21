@@ -35,6 +35,9 @@ from fetch_organic import (
     validate_organic_environment
 )
 
+# Import optimized API helpers
+from api_helpers import get_api_stats
+
 # Import paid insights functions with error handling
 try:
     from fetch_paid import get_campaign_performance_with_creatives, get_paid_insights
@@ -219,9 +222,19 @@ def show_instagram_insights():
                 # Store in session state
                 st.session_state.ig_data = df
                 st.session_state.follower_count = follower_count
+                st.session_state.last_fetch_time = datetime.now()
 
                 if df.empty:
-                    st.warning("⚠️ No Instagram insights returned. Check your token permissions, Instagram Business account linkage, and date range.")
+                    st.warning("⚠️ No Instagram insights returned. This could be due to:")
+                    st.write("• Rate limiting (please wait and try again)")
+                    st.write("• Token permissions")
+                    st.write("• Instagram Business account linkage")
+                    st.write("• Date range with no data")
+                    
+                    # Show API usage stats
+                    api_stats = get_api_stats()
+                    if api_stats['total_calls'] > 150:
+                        st.warning(f"⚠️ High API usage detected: {api_stats['total_calls']} calls in {api_stats['session_duration_minutes']:.1f} minutes")
                     return
 
                 # Limit posts if requested
@@ -230,10 +243,24 @@ def show_instagram_insights():
                     df = df[df['media_id'].isin(unique_media)]
                     st.session_state.ig_data = df
 
+                # Show success with API stats
+                api_stats = get_api_stats()
                 st.success(f"✅ Fetched {len(df)} records from {len(df['media_id'].unique()) if not df.empty else 0} posts")
+                
+                # Show rate limit warning if approaching limits
+                if api_stats['calls_per_minute'] > 2.5:  # Over 150 calls per hour
+                    st.warning(f"⚠️ High API usage: {api_stats['calls_per_minute']:.1f} calls/min. Consider using cached data.")
 
             except Exception as e:
-                st.error(f"❌ Error fetching Instagram data: {str(e)}")
+                error_msg = str(e).lower()
+                if 'rate limit' in error_msg or 'user request limit' in error_msg:
+                    st.error("🚫 Rate limit reached. Please wait a few minutes before refreshing.")
+                    if 'last_fetch_time' in st.session_state:
+                        last_fetch = st.session_state.last_fetch_time
+                        st.info(f"Last successful fetch: {last_fetch.strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    st.error(f"❌ Error fetching Instagram data: {str(e)}")
+                
                 logger.error(f"Instagram fetch error: {e}", exc_info=True)
                 return
 
@@ -522,14 +549,27 @@ def show_paid_campaign_insights():
 
     with st.spinner("Loading paid campaign data..."):
         try:
-            # Use the correct function with proper parameters
+            # Add force refresh option
+            force_refresh = st.sidebar.checkbox("Force refresh (bypass cache)", value=False)
+            
+            # Use the optimized function with force refresh option
             paid_data = get_campaign_performance_with_creatives(
                 date_preset=date_preset, 
-                include_creatives=include_creatives
+                include_creatives=include_creatives,
+                force_refresh=force_refresh
             )
 
             if paid_data.empty:
-                st.warning("No paid campaign data available. Check your Meta Ads account connection and ensure AD_ACCOUNT_ID is set.")
+                st.warning("No paid campaign data available. This could be due to:")
+                st.write("• Rate limiting (please wait and try again)")
+                st.write("• Meta Ads account connection issues")
+                st.write("• Missing AD_ACCOUNT_ID environment variable")
+                st.write("• No campaigns in the selected date range")
+                
+                # Show API usage stats
+                api_stats = get_api_stats()
+                if api_stats['total_calls'] > 100:
+                    st.warning(f"⚠️ API usage: {api_stats['total_calls']} calls in {api_stats['session_duration_minutes']:.1f} minutes")
                 return
 
             # Display summary metrics
@@ -613,9 +653,34 @@ def main():
     with tab2:
         show_paid_campaign_insights()
 
+    # API Usage Statistics Section
+    with st.expander("📊 API Usage Statistics", expanded=False):
+        api_stats = get_api_stats()
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total API Calls", api_stats['total_calls'])
+        
+        with col2:
+            st.metric("Calls per Minute", f"{api_stats['calls_per_minute']:.1f}")
+        
+        with col3:
+            st.metric("Session Duration", f"{api_stats['session_duration_minutes']:.1f} min")
+        
+        # Rate limit warnings
+        if api_stats['calls_per_minute'] > 3:
+            st.warning("⚠️ High API usage detected. Consider using cached data or reducing fetch frequency.")
+        elif api_stats['total_calls'] > 200:
+            st.info("ℹ️ High total API usage this session. Monitor for rate limits.")
+        else:
+            st.success("✅ API usage within normal limits")
+        
+        st.caption(f"Session started: {api_stats['session_start']}")
+
     # Footer
     st.markdown("---")
-    st.markdown("*Built with Streamlit • Powered by Meta Graph API & OpenAI*")
+    st.markdown("*Built with Streamlit • Powered by Meta Graph API & OpenAI • Optimized with Rate Limiting*")
 
 if __name__ == "__main__":
     main()

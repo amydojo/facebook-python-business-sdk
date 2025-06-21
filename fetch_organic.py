@@ -21,8 +21,11 @@ from config import config
 logger = logging.getLogger(__name__)
 
 # Graph API version and base URL for consistent endpoint calls
-GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v19.0")
+GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v21.0")  # Updated to latest
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+
+# Import optimized API helpers
+from api_helpers import safe_api_call, get_api_stats
 
 # Session-level caches for Instagram insights optimization
 _media_metrics_cache = {}          # key: (media_type, media_product_type), value: [metrics]
@@ -327,7 +330,7 @@ def choose_metrics_for_media(media: Dict) -> List[str]:
 
 def fetch_insights_for_media(media: Dict) -> List[Dict]:
     """
-    Fetch insights for a single media item with iterative metric removal.
+    Optimized insights fetch for a single media item using safe API calls.
 
     Args:
         media: Dict with media information from /{ig_user_id}/media
@@ -352,24 +355,35 @@ def fetch_insights_for_media(media: Dict) -> List[Dict]:
         logger.warning(f"No metrics available for media {media_id}")
         return records
 
-    # Iterative removal approach for unsupported metrics
+    # Iterative removal approach for unsupported metrics with safe API calls
     to_try = metrics.copy()
 
     while to_try:
         metric_str = ",".join(to_try)
-        url = f"{GRAPH_API_BASE}/{media_id}/insights"
-        params = {"metric": metric_str, "access_token": token}
+        
+        def api_call():
+            url = f"{GRAPH_API_BASE}/{media_id}/insights"
+            params = {"metric": metric_str, "access_token": token}
+            resp = requests.get(url, params=params, timeout=15)
+            return resp
+
+        # Use safe API call wrapper
+        resp = safe_api_call(
+            api_call,
+            f"media_insights_{media_id}",
+            {"metrics": metric_str},
+            cache_ttl_hours=6,  # Cache media insights for 6 hours
+            use_cache=True
+        )
+
+        if resp is None:
+            logger.warning(f"❌ Rate limited or failed for media {media_id}")
+            break
 
         try:
-            logger.info(f"Fetching insights from: {url} with metrics: {metric_str}")
-            resp = requests.get(url, params=params, timeout=10)
             body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-            
-            logger.info(f"Insights API response: status={resp.status_code}, body={body}")
-
-        except Exception as e:
-            logger.warning(f"Exception fetching insights for media {media_id}: {e}")
-            break
+        except:
+            body = {}
 
         if resp.status_code == 200 and "data" in body:
             # Success - extract metrics

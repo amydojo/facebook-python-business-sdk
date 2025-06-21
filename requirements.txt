@@ -1,9 +1,7 @@
-
-# Fix for Python 3.12 - setuptools includes distutils replacement
 setuptools>=69.0.0
 
-# Pin facebook-business to stable version compatible with Graph API
-facebook-business==18.0.0
+# Core dependencies
+facebook-business==20.0.3
 pandas==2.1.4
 requests==2.31.0
 python-dotenv==1.0.0

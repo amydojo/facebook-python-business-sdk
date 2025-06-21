@@ -1,8 +1,6 @@
+
 """
-The code has been modified to improve the get_paid_insights function with better error handling and to add a backward compatibility alias.
-"""
-"""
-Facebook Ads API integration for fetching paid campaign performance data.
+Optimized Facebook Ads API integration with rate limiting and performance improvements.
 Official docs: https://developers.facebook.com/docs/marketing-api/insights/
 """
 import os
@@ -13,15 +11,18 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from config import config
 
+# Import optimized API helpers
+from api_helpers import safe_api_call, batch_facebook_requests, get_api_stats
+
 # Import fb_client for API access
 from fb_client import fb_client
 
-# Facebook Business SDK imports for creative previews
-# Official docs: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/
+# Facebook Business SDK imports
 try:
     from facebook_business.adobjects.campaign import Campaign
     from facebook_business.adobjects.ad import Ad
     from facebook_business.adobjects.adcreative import AdCreative
+    from facebook_business.adobjects.adaccount import AdAccount
     CREATIVE_SDK_AVAILABLE = True
 except ImportError as e:
     logging.warning(f"Creative SDK imports not available: {e}")
@@ -29,35 +30,69 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
-def fetch_ad_insights(level="campaign", fields=None, date_preset=None, since=None, until=None, filtering=None, breakdowns=None):
-    """
-    Generic fetcher for paid insights via Facebook Business SDK.
-    Official docs: https://developers.facebook.com/docs/marketing-api/insights/
+def get_account_with_retries() -> Optional[AdAccount]:
+    """Get Facebook Ad Account with safe API call."""
+    if not hasattr(fb_client, "account") or fb_client.account is None:
+        logger.error("❌ Facebook client not initialized")
+        return None
+    return fb_client.account
 
+def fetch_campaign_insights_optimized(
+    level: str = "campaign",
+    fields: List[str] = None,
+    date_preset: str = None,
+    since: str = None,
+    until: str = None,
+    filtering: List[Dict] = None,
+    breakdowns: List[str] = None,
+    use_cache: bool = True,
+    force_refresh: bool = False
+) -> pd.DataFrame:
+    """
+    Optimized insights fetcher using expanded fields and safe API calls.
+    
     Args:
         level: 'campaign', 'adset', or 'ad'
-        fields: List of metrics to fetch
+        fields: List of metrics and expanded fields
         date_preset: 'yesterday', 'last_7d', 'last_30d', etc.
         since/until: Custom date range (YYYY-MM-DD format)
         filtering: List of filters
         breakdowns: List of breakdowns
-
+        use_cache: Whether to use caching
+        force_refresh: Force refresh cache
+    
     Returns:
         pandas.DataFrame with insights data
     """
-    account = getattr(fb_client, "account", None)
+    account = get_account_with_retries()
     if account is None:
-        logger.error("❌ fetch_ad_insights: Facebook client not initialized")
         return pd.DataFrame()
 
-    # Default fields if none provided
+    # Enhanced field lists with creative expansion
     if fields is None:
+        base_fields = ["impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm"]
+        
         if level == "campaign":
-            fields = ["campaign_id", "campaign_name", "impressions", "clicks", "spend", "ctr", "cpc", "cpm"]
+            fields = [
+                "campaign_id", "campaign_name", "objective", "status",
+                *base_fields,
+                "date_start", "date_stop"
+            ]
         elif level == "adset":
-            fields = ["adset_id", "adset_name", "campaign_id", "impressions", "clicks", "spend", "ctr", "cpc"]
+            fields = [
+                "adset_id", "adset_name", "campaign_id", "campaign_name",
+                "optimization_goal", "billing_event", "bid_amount",
+                *base_fields,
+                "date_start", "date_stop"
+            ]
         else:  # ad level
-            fields = ["ad_id", "ad_name", "adset_id", "campaign_id", "impressions", "clicks", "spend", "ctr", "cpc"]
+            fields = [
+                "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
+                *base_fields,
+                "date_start", "date_stop",
+                # Expanded creative fields to get preview data in one call
+                "creative{id,name,body,title,image_url,thumbnail_url,object_url}"
+            ]
 
     # Build params
     params = {"level": level}
@@ -67,7 +102,6 @@ def fetch_ad_insights(level="campaign", fields=None, date_preset=None, since=Non
     elif since and until:
         params["time_range"] = {"since": since, "until": until}
     else:
-        # Default to yesterday
         params["date_preset"] = "yesterday"
 
     if filtering:
@@ -75,274 +109,290 @@ def fetch_ad_insights(level="campaign", fields=None, date_preset=None, since=Non
     if breakdowns:
         params["breakdowns"] = breakdowns
 
+    # Create cache-friendly endpoint identifier
+    endpoint = f"insights_{level}_{date_preset or f'{since}_to_{until}'}"
+    
+    def api_call():
+        return account.get_insights(fields=fields, params=params)
+
+    # Use safe API call with caching
+    insights_data = safe_api_call(
+        api_call,
+        endpoint,
+        params,
+        use_cache=use_cache,
+        cache_ttl_hours=2,  # Cache for 2 hours
+        force_refresh=force_refresh
+    )
+
+    if not insights_data:
+        logger.warning("⚠️ No insights data returned")
+        return pd.DataFrame()
+
+    # Process paginated results
     all_data = []
+    page_count = 0
+    
     try:
-        logger.info(f"🔍 Fetching {level} insights with params: {params}")
-
-        # Get insights from Facebook API
-        insights = account.get_insights(fields=fields, params=params)
-
-        # Process all pages of results
-        while insights:
-            for entry in insights:
-                all_data.append(entry.export_all_data())
-            try:
-                insights = insights.next_page()
-            except Exception:
-                # No more pages
-                break
+        # Handle both cached data (list) and live API response
+        if isinstance(insights_data, list):
+            all_data = insights_data
+        else:
+            while insights_data:
+                page_count += 1
+                logger.info(f"📄 Processing insights page {page_count}")
+                
+                for entry in insights_data:
+                    data = entry.export_all_data() if hasattr(entry, 'export_all_data') else entry
+                    all_data.append(data)
+                
+                try:
+                    # Rate-limited pagination
+                    insights_data = safe_api_call(
+                        lambda: insights_data.next_page(),
+                        f"{endpoint}_page_{page_count}",
+                        {},
+                        use_cache=False  # Don't cache pagination
+                    )
+                except Exception:
+                    break
 
         logger.info(f"✅ Successfully fetched {len(all_data)} {level} insight records")
 
     except Exception as e:
-        logger.error(f"❌ fetch_ad_insights error: {e}", exc_info=True)
+        logger.error(f"❌ Error processing insights data: {e}", exc_info=True)
         return pd.DataFrame()
 
     if not all_data:
-        logger.warning("⚠️ No insights data returned from Facebook API")
         return pd.DataFrame()
 
     return pd.DataFrame(all_data)
 
-def get_campaign_performance(date_preset="last_7d", since=None, until=None, extra_fields=None):
+def enrich_with_creative_data_batch(df_ads: pd.DataFrame) -> pd.DataFrame:
     """
-    Wrapper to fetch campaign-level performance data.
+    Batch enrich ad data with creative information using expanded fields.
+    
+    Args:
+        df_ads: DataFrame with ad performance data
+    
+    Returns:
+        DataFrame enriched with creative data
+    """
+    if df_ads.empty or not CREATIVE_SDK_AVAILABLE:
+        return df_ads
 
+    # If creative data is already present (from expanded fields), return as-is
+    if 'creative' in df_ads.columns or any('creative_' in col for col in df_ads.columns):
+        logger.info("Creative data already present in response")
+        return df_ads
+
+    # Batch process missing creative data
+    unique_ad_ids = df_ads['ad_id'].unique()[:50]  # Limit for safety
+    
+    def batch_get_creatives():
+        creative_data = {}
+        for ad_id in unique_ad_ids:
+            try:
+                ad = Ad(ad_id)
+                creative_info = safe_api_call(
+                    lambda: ad.api_get(fields=[
+                        'creative{id,name,body,title,image_url,thumbnail_url,object_url}'
+                    ]),
+                    f"ad_creative_{ad_id}",
+                    {},
+                    cache_ttl_hours=24  # Cache creative data longer
+                )
+                
+                if creative_info and 'creative' in creative_info:
+                    creative_data[ad_id] = creative_info['creative']
+                    
+            except Exception as e:
+                logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
+                continue
+        
+        return creative_data
+
+    creative_data = batch_get_creatives()
+    
+    # Merge creative data with performance data
+    if creative_data:
+        creative_rows = []
+        for _, row in df_ads.iterrows():
+            ad_id = row['ad_id']
+            creative = creative_data.get(ad_id, {})
+            
+            enriched_row = row.to_dict()
+            enriched_row.update({
+                'creative_id': creative.get('id'),
+                'creative_name': creative.get('name'),
+                'creative_body': creative.get('body'),
+                'creative_title': creative.get('title'),
+                'creative_image_url': creative.get('image_url'),
+                'creative_thumbnail_url': creative.get('thumbnail_url'),
+                'creative_object_url': creative.get('object_url')
+            })
+            creative_rows.append(enriched_row)
+        
+        return pd.DataFrame(creative_rows)
+    
+    return df_ads
+
+def get_campaign_performance_optimized(
+    date_preset: str = "last_7d",
+    since: str = None,
+    until: str = None,
+    extra_fields: List[str] = None,
+    force_refresh: bool = False
+) -> pd.DataFrame:
+    """
+    Optimized campaign performance fetcher.
+    
     Args:
         date_preset: 'yesterday', 'last_7d', 'last_30d', etc.
-        since/until: Custom date range (YYYY-MM-DD format)
+        since/until: Custom date range
         extra_fields: Additional fields to include
-
+        force_refresh: Force refresh cache
+    
     Returns:
-        pandas.DataFrame with campaign performance data
+        DataFrame with campaign performance data
     """
-    logger.info(f"📊 Fetching campaign performance for {date_preset or f'{since} to {until}'}")
+    logger.info(f"📊 Fetching optimized campaign performance for {date_preset or f'{since} to {until}'}")
 
     base_fields = [
-        "campaign_id", "campaign_name", "impressions", "clicks", "spend", 
-        "reach", "frequency", "ctr", "cpc", "cpm", "date_start", "date_stop"
+        "campaign_id", "campaign_name", "objective", "status",
+        "impressions", "clicks", "spend", "reach", "frequency", 
+        "ctr", "cpc", "cpm", "date_start", "date_stop"
     ]
 
     if extra_fields:
-        for field in extra_fields:
-            if field not in base_fields:
-                base_fields.append(field)
+        base_fields.extend([f for f in extra_fields if f not in base_fields])
 
-    return fetch_ad_insights(
-        level="campaign", 
-        fields=base_fields, 
-        date_preset=date_preset, 
-        since=since, 
-        until=until
+    return fetch_campaign_insights_optimized(
+        level="campaign",
+        fields=base_fields,
+        date_preset=date_preset,
+        since=since,
+        until=until,
+        force_refresh=force_refresh
     )
 
-def enrich_with_creatives(df_campaigns: pd.DataFrame) -> pd.DataFrame:
+def get_ad_performance_optimized(
+    campaign_ids: List[str] = None,
+    date_preset: str = "last_7d",
+    include_creatives: bool = True,
+    force_refresh: bool = False
+) -> pd.DataFrame:
     """
-    Enrich campaign performance data with ad creative previews.
-
-    Official docs: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/
-
+    Optimized ad-level performance with creative data.
+    
     Args:
-        df_campaigns: DataFrame with campaign performance metrics
-
+        campaign_ids: Filter by specific campaign IDs
+        date_preset: Date range preset
+        include_creatives: Include creative preview data
+        force_refresh: Force refresh cache
+    
     Returns:
-        DataFrame with creative preview fields added
+        DataFrame with ad performance and creative data
     """
-    if not CREATIVE_SDK_AVAILABLE:
-        logger.warning("Creative SDK not available, returning campaigns without creative data")
-        return df_campaigns
+    filtering = None
+    if campaign_ids:
+        filtering = [{'field': 'campaign.id', 'operator': 'IN', 'value': campaign_ids}]
 
-    if df_campaigns.empty:
-        return pd.DataFrame(columns=[
-            "campaign_id", "campaign_name", "ad_id", "ad_name", "creative_id", "creative_name",
-            "creative_body", "creative_title", "creative_image_url", "creative_thumbnail_url",
-            "creative_object_url", "impressions", "clicks", "spend", "reach", "frequency", 
-            "ctr", "cpc", "date_start", "date_stop"
-        ])
+    # Enhanced fields with creative expansion
+    fields = [
+        "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
+        "impressions", "clicks", "spend", "reach", "ctr", "cpc", "cpm",
+        "date_start", "date_stop"
+    ]
+    
+    if include_creatives:
+        fields.append("creative{id,name,body,title,image_url,thumbnail_url,object_url}")
 
-    records = []
+    df_ads = fetch_campaign_insights_optimized(
+        level="ad",
+        fields=fields,
+        date_preset=date_preset,
+        filtering=filtering,
+        force_refresh=force_refresh
+    )
 
-    for _, row in df_campaigns.iterrows():
-        campaign_id = row.get('campaign_id')
-        campaign_name = row.get('campaign_name')
+    # Additional creative enrichment if needed
+    if include_creatives and not df_ads.empty:
+        df_ads = enrich_with_creative_data_batch(df_ads)
 
-        if not campaign_id:
-            continue
+    return df_ads
 
-        try:
-            # Fetch ads for this campaign
-            # Official docs: https://developers.facebook.com/docs/marketing-api/reference/campaign/ads/
-            ads = Campaign(campaign_id).get_ads(fields=[
-                Ad.Field.id,
-                Ad.Field.name,
-                Ad.Field.creative
-            ])
-
-            for ad in ads:
-                ad_id = ad.get(Ad.Field.id)
-                ad_name = ad.get(Ad.Field.name)
-                creative_id = None
-                creative_name = creative_body = creative_title = None
-                creative_image_url = creative_thumbnail_url = creative_object_url = None
-
-                # Extract creative info
-                creative_info = ad.get(Ad.Field.creative)
-                if creative_info:
-                    creative_id = creative_info.get('id')
-
-                    if creative_id:
-                        try:
-                            # Fetch creative details with preview URLs
-                            creative = AdCreative(creative_id).api_get(fields=[
-                                AdCreative.Field.name,
-                                AdCreative.Field.body,
-                                AdCreative.Field.title,
-                                AdCreative.Field.image_url,
-                                AdCreative.Field.thumbnail_url,
-                                AdCreative.Field.object_url
-                            ])
-
-                            creative_name = creative.get(AdCreative.Field.name)
-                            creative_body = creative.get(AdCreative.Field.body)
-                            creative_title = creative.get(AdCreative.Field.title)
-                            creative_image_url = creative.get(AdCreative.Field.image_url)
-                            creative_thumbnail_url = creative.get(AdCreative.Field.thumbnail_url)
-                            creative_object_url = creative.get(AdCreative.Field.object_url)
-
-                        except Exception as e:
-                            logger.warning(f"Failed to fetch creative details for creative {creative_id}: {e}")
-
-                # Merge with performance row
-                record = {
-                    "campaign_id": campaign_id,
-                    "campaign_name": campaign_name,
-                    "ad_id": ad_id,
-                    "ad_name": ad_name,
-                    "creative_id": creative_id,
-                    "creative_name": creative_name,
-                    "creative_body": creative_body,
-                    "creative_title": creative_title,
-                    "creative_image_url": creative_image_url,
-                    "creative_thumbnail_url": creative_thumbnail_url,
-                    "creative_object_url": creative_object_url,
-                }
-
-                # Copy performance metrics from row with safe conversion
-                for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm']:
-                    value = row.get(col, 0)
-                    if col in ['impressions', 'clicks', 'reach']:
-                        # Convert to int, handle strings
-                        record[col] = int(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0
-                    elif col in ['spend', 'frequency', 'ctr', 'cpc', 'cpm']:
-                        # Convert to float, handle strings
-                        record[col] = float(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0.0
-                    else:
-                        record[col] = value
-
-                # Copy date fields as-is
-                for col in ['date_start', 'date_stop']:
-                    record[col] = row.get(col, None)
-
-                records.append(record)
-
-        except Exception as e:
-            logger.warning(f"Failed to fetch ads for campaign {campaign_id}: {e}")
-            # Add campaign row without creative data
-            record = {
-                "campaign_id": campaign_id,
-                "campaign_name": campaign_name,
-                "ad_id": None,
-                "ad_name": None,
-                "creative_id": None,
-                "creative_name": None,
-                "creative_body": None,
-                "creative_title": None,
-                "creative_image_url": None,
-                "creative_thumbnail_url": None,
-                "creative_object_url": None,
-            }
-            # Copy performance metrics with safe conversion
-            for col in ['impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm']:
-                value = row.get(col, 0)
-                if col in ['impressions', 'clicks', 'reach']:
-                    record[col] = int(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0
-                elif col in ['spend', 'frequency', 'ctr', 'cpc', 'cpm']:
-                    record[col] = float(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0.0
-                else:
-                    record[col] = value
-
-            # Copy date fields as-is
-            for col in ['date_start', 'date_stop']:
-                record[col] = row.get(col, None)
-            records.append(record)
-
-    if not records:
-        return pd.DataFrame(columns=[
-            "campaign_id", "campaign_name", "ad_id", "ad_name", "creative_id", "creative_name",
-            "creative_body", "creative_title", "creative_image_url", "creative_thumbnail_url", 
-            "creative_object_url", "impressions", "clicks", "spend", "reach", "frequency",
-            "ctr", "cpc", "cpm", "date_start", "date_stop"
-        ])
-
-    df_enriched = pd.DataFrame(records)
-    logger.info(f"Enriched {len(df_enriched)} campaign records with creative data")
-    return df_enriched
-
-def get_campaign_performance_with_creatives(date_preset: str = "last_7d", include_creatives: bool = True) -> pd.DataFrame:
+def get_campaign_performance_with_creatives(
+    date_preset: str = "last_7d",
+    include_creatives: bool = True,
+    force_refresh: bool = False
+) -> pd.DataFrame:
     """
-    Get campaign performance data enriched with creative previews.
-
+    Main function for campaign performance with creative data.
+    
     Args:
         date_preset: Date range preset
         include_creatives: Whether to fetch creative preview data
-
+        force_refresh: Force refresh cache
+    
     Returns:
         DataFrame with campaign performance and creative data
     """
-    # Get base campaign performance
-    df_campaigns = get_campaign_performance(date_preset=date_preset)
+    if include_creatives:
+        # Get ad-level data with creatives (more comprehensive)
+        return get_ad_performance_optimized(
+            date_preset=date_preset,
+            include_creatives=True,
+            force_refresh=force_refresh
+        )
+    else:
+        # Get campaign-level data only
+        return get_campaign_performance_optimized(
+            date_preset=date_preset,
+            force_refresh=force_refresh
+        )
 
-    if include_creatives and not df_campaigns.empty:
-        return enrich_with_creatives(df_campaigns)
-
-    return df_campaigns
-
-def get_paid_insights(date_preset: str = "last_7d", since: str = None, until: str = None, include_creatives: bool = True) -> pd.DataFrame:
+def get_paid_insights(
+    date_preset: str = "last_7d",
+    since: str = None,
+    until: str = None,
+    include_creatives: bool = True,
+    force_refresh: bool = False
+) -> pd.DataFrame:
     """
-    Main function to get paid campaign insights - wrapper around get_campaign_performance_with_creatives.
-
+    Main function to get paid campaign insights with optimizations.
+    
     Args:
-        date_preset: Date range preset ('yesterday', 'last_7d', 'last_30d', etc.)
-        since: Start date in YYYY-MM-DD format (optional)
-        until: End date in YYYY-MM-DD format (optional)
-        include_creatives: Whether to include creative preview data
-
+        date_preset: Date range preset
+        since/until: Custom date range
+        include_creatives: Include creative preview data
+        force_refresh: Force refresh cache
+    
     Returns:
         DataFrame with paid campaign performance and creative data
     """
     try:
-        logger.info(f"📊 Fetching paid insights for {date_preset or f'{since} to {until}'}")
+        logger.info(f"📊 Fetching optimized paid insights for {date_preset or f'{since} to {until}'}")
 
         if since and until:
-            # Use custom date range - basic insights only
-            return fetch_ad_insights(
+            # Custom date range - campaign level only for performance
+            return fetch_campaign_insights_optimized(
                 level="campaign",
-                fields=[
-                    "campaign_id", "campaign_name", "impressions", "clicks", "spend", 
-                    "reach", "frequency", "ctr", "cpc", "cpm", "date_start", "date_stop"
-                ],
+                date_preset=None,
                 since=since,
-                until=until
+                until=until,
+                force_refresh=force_refresh
             )
         else:
-            # Use date preset with optional creatives
+            # Use optimized function with creative data
             return get_campaign_performance_with_creatives(
-                date_preset=date_preset, 
-                include_creatives=include_creatives
+                date_preset=date_preset,
+                include_creatives=include_creatives,
+                force_refresh=force_refresh
             )
 
     except Exception as e:
-        logger.error(f"❌ Error fetching paid insights: {e}", exc_info=True)
+        logger.error(f"❌ Error fetching optimized paid insights: {e}", exc_info=True)
         return pd.DataFrame()
 
 # Backward compatibility aliases
@@ -350,19 +400,33 @@ def get_campaign_insights(*args, **kwargs):
     """Alias for get_paid_insights"""
     return get_paid_insights(*args, **kwargs)
 
-def get_campaign_performance_summary(date_preset: str = "last_7d", campaign_ids: List[str] = None) -> Dict:
+def get_campaign_performance_summary(
+    date_preset: str = "last_7d",
+    campaign_ids: List[str] = None,
+    force_refresh: bool = False
+) -> Dict:
     """
-    Get summarized campaign performance data.
-
+    Optimized campaign performance summary.
+    
     Args:
         date_preset: Date range preset
-        campaign_ids: List of specific campaign IDs (optional)
-
+        campaign_ids: Filter by specific campaign IDs
+        force_refresh: Force refresh cache
+    
     Returns:
-        dict: Summary statistics
+        Dict with summary statistics
     """
     try:
-        performance_data = get_campaign_performance(date_preset=date_preset)
+        filtering = None
+        if campaign_ids:
+            filtering = [{'field': 'campaign.id', 'operator': 'IN', 'value': campaign_ids}]
+
+        performance_data = fetch_campaign_insights_optimized(
+            level="campaign",
+            date_preset=date_preset,
+            filtering=filtering,
+            force_refresh=force_refresh
+        )
 
         if performance_data.empty:
             return {
@@ -371,14 +435,9 @@ def get_campaign_performance_summary(date_preset: str = "last_7d", campaign_ids:
                 'total_impressions': 0,
                 'total_clicks': 0,
                 'average_ctr': 0,
-                'average_cpc': 0
+                'average_cpc': 0,
+                'api_stats': get_api_stats()
             }
-
-        # Filter by campaign IDs if provided
-        if campaign_ids:
-            performance_data = performance_data[
-                performance_data['campaign_id'].isin(campaign_ids)
-            ]
 
         # Calculate summary metrics with proper type conversion
         total_spend = pd.to_numeric(performance_data['spend'], errors='coerce').fillna(0).sum()
@@ -395,92 +454,34 @@ def get_campaign_performance_summary(date_preset: str = "last_7d", campaign_ids:
             'total_clicks': total_clicks,
             'average_ctr': round(average_ctr, 2),
             'average_cpc': round(average_cpc, 2),
-            'date_range': date_preset
+            'date_range': date_preset,
+            'api_stats': get_api_stats()
         }
 
-        logger.info(f"📈 Generated performance summary: {summary}")
+        logger.info(f"📈 Generated optimized performance summary: {summary}")
         return summary
 
     except Exception as e:
-        logger.error(f"❌ Error generating campaign performance summary: {e}", exc_info=True)
-        return {}
-
-def get_ad_performance(campaign_id=None, date_preset='last_7d'):
-    """
-    Get ad-level performance data.
-
-    Args:
-        campaign_id: Specific campaign ID to filter by
-        date_preset: Date range preset
-
-    Returns:
-        pandas.DataFrame: Ad performance data
-    """
-    filtering = None
-    if campaign_id:
-        filtering = [{'field': 'campaign.id', 'operator': 'IN', 'value': [campaign_id]}]
-
-    return fetch_ad_insights(
-        level="ad",
-        fields=[
-            "ad_id", "ad_name", "campaign_id", "campaign_name", 
-            "adset_id", "adset_name", "impressions", "clicks", 
-            "spend", "ctr", "cpc", "cpm"
-        ],
-        date_preset=date_preset,
-        filtering=filtering
-    )
-
-def get_real_time_insights(campaign_ids=None):
-    """
-    Get real-time campaign insights (today's data).
-
-    Args:
-        campaign_ids: List of campaign IDs to check
-
-    Returns:
-        pandas.DataFrame: Real-time insights data
-    """
-    filtering = None
-    if campaign_ids:
-        filtering = [{'field': 'campaign.id', 'operator': 'IN', 'value': campaign_ids}]
-
-    return fetch_ad_insights(
-        level="campaign",
-        fields=[
-            "campaign_id", "campaign_name", "impressions", 
-            "clicks", "spend", "date_start", "date_stop"
-        ],
-        date_preset="today",
-        filtering=filtering
-    )
+        logger.error(f"❌ Error generating optimized performance summary: {e}", exc_info=True)
+        return {'api_stats': get_api_stats()}
 
 if __name__ == "__main__":
-    # Set env vars for testing
-    import os
-    # os.environ["PAGE_ACCESS_TOKEN"] = "<PAGE_ACCESS_TOKEN>"
-    # os.environ["IG_USER_ID"] = "<IG_USER_ID>"
-    # os.environ["AD_ACCOUNT_ID"] = "<AD_ACCOUNT_ID>"
-    # os.environ["META_ACCESS_TOKEN"] = "<META_ACCESS_TOKEN>"
-    # os.environ["META_APP_ID"] = "<META_APP_ID>"
-    # os.environ["META_APP_SECRET"] = "<META_APP_SECRET>"
-
-    # Test fb_client
-    print("fb_client.account:", getattr(fb_client, "account", None))
-    print("fb_client initialized:", fb_client.is_initialized())
-
-    # Test paid fetch
-    logger.info("🧪 Testing paid campaign fetch with creative previews...")
+    # Test optimized paid insights
+    logger.info("🧪 Testing optimized paid insights...")
     try:
-        df_paid = get_campaign_performance_with_creatives(date_preset="last_7d")
-        print("Paid head:", df_paid.head() if not df_paid.empty else "Empty DataFrame")
-        print("Paid cols:", df_paid.columns.tolist())
-
+        df_paid = get_paid_insights(date_preset="last_7d", force_refresh=True)
+        print(f"Optimized paid insights: {len(df_paid)} records")
+        print(f"Columns: {df_paid.columns.tolist()}")
+        
         if not df_paid.empty:
-            # Check for preview URLs
-            has_images = df_paid['creative_image_url'].notna().sum() if 'creative_image_url' in df_paid.columns else 0
-            has_thumbnails = df_paid['creative_thumbnail_url'].notna().sum() if 'creative_thumbnail_url' in df_paid.columns else 0
-            print(f"Preview URLs found: {has_images} images, {has_thumbnails} thumbnails")
+            # Check for creative data
+            creative_cols = [col for col in df_paid.columns if 'creative' in col]
+            print(f"Creative columns: {creative_cols}")
+        
+        # Print API usage stats
+        stats = get_api_stats()
+        print(f"API Usage Stats: {stats}")
+        
     except Exception as e:
-        print(f"Paid test failed: {e}")
-        logger.error(f"Paid test error: {e}", exc_info=True)
+        print(f"Test failed: {e}")
+        logger.error(f"Test error: {e}", exc_info=True)
