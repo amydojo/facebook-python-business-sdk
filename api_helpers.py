@@ -426,7 +426,6 @@ def safe_api_call(
             logger.info(f"API call successful in {elapsed:.2f}s")
             
             # Check rate limiting headers if available
-            # Check rate limiting headers if available
             if hasattr(result, 'headers'):
                 # Monitor app-level usage
                 usage_header = result.headers.get('x-app-usage', '')
