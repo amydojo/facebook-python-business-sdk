@@ -89,9 +89,9 @@ def fetch_campaign_insights_optimized(
             fields = [
                 "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
                 *base_fields,
-                "date_start", "date_stop",
-                # Expanded creative fields to get preview data in one call
-                "creative{id,name,body,title,image_url,thumbnail_url,object_url}"
+                "date_start", "date_stop"
+                # Note: creative fields cannot be fetched in insights call
+                # Will fetch separately using ad creative endpoint
             ]
 
     # Build params
@@ -170,7 +170,7 @@ def fetch_campaign_insights_optimized(
 
 def enrich_with_creative_data_batch(df_ads: pd.DataFrame) -> pd.DataFrame:
     """
-    Batch enrich ad data with creative information using expanded fields.
+    Batch enrich ad data with creative information.
     
     Args:
         df_ads: DataFrame with ad performance data
@@ -181,30 +181,50 @@ def enrich_with_creative_data_batch(df_ads: pd.DataFrame) -> pd.DataFrame:
     if df_ads.empty or not CREATIVE_SDK_AVAILABLE:
         return df_ads
 
-    # If creative data is already present (from expanded fields), return as-is
-    if 'creative' in df_ads.columns or any('creative_' in col for col in df_ads.columns):
+    # If creative data is already present, return as-is
+    if any('creative_' in col for col in df_ads.columns):
         logger.info("Creative data already present in response")
         return df_ads
 
-    # Batch process missing creative data
-    unique_ad_ids = df_ads['ad_id'].unique()[:50]  # Limit for safety
+    # Get unique ad IDs, limit for safety
+    unique_ad_ids = df_ads['ad_id'].unique()[:50]  
+    logger.info(f"Fetching creative data for {len(unique_ad_ids)} ads")
     
     def batch_get_creatives():
         creative_data = {}
         for ad_id in unique_ad_ids:
             try:
-                ad = Ad(ad_id)
-                creative_info = safe_api_call(
-                    lambda: ad.api_get(fields=[
-                        'creative{id,name,body,title,image_url,thumbnail_url,object_url}'
-                    ]),
-                    f"ad_creative_{ad_id}",
+                def get_ad_creative():
+                    ad = Ad(ad_id)
+                    return ad.api_get(fields=['creative'])
+                
+                ad_info = safe_api_call(
+                    get_ad_creative,
+                    f"ad_{ad_id}",
                     {},
-                    cache_ttl_hours=24  # Cache creative data longer
+                    cache_ttl_hours=24
                 )
                 
-                if creative_info and 'creative' in creative_info:
-                    creative_data[ad_id] = creative_info['creative']
+                if ad_info and 'creative' in ad_info:
+                    creative_id = ad_info['creative']['id']
+                    
+                    # Now fetch the actual creative details
+                    def get_creative_details():
+                        creative = AdCreative(creative_id)
+                        return creative.api_get(fields=[
+                            'id', 'name', 'body', 'title', 'image_url', 
+                            'thumbnail_url', 'object_url'
+                        ])
+                    
+                    creative_details = safe_api_call(
+                        get_creative_details,
+                        f"creative_{creative_id}",
+                        {},
+                        cache_ttl_hours=24
+                    )
+                    
+                    if creative_details:
+                        creative_data[ad_id] = creative_details.export_all_data() if hasattr(creative_details, 'export_all_data') else creative_details
                     
             except Exception as e:
                 logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
@@ -216,6 +236,7 @@ def enrich_with_creative_data_batch(df_ads: pd.DataFrame) -> pd.DataFrame:
     
     # Merge creative data with performance data
     if creative_data:
+        logger.info(f"Enriching {len(df_ads)} rows with creative data from {len(creative_data)} ads")
         creative_rows = []
         for _, row in df_ads.iterrows():
             ad_id = row['ad_id']
@@ -305,9 +326,9 @@ def get_ad_performance_optimized(
         "date_start", "date_stop"
     ]
     
-    if include_creatives:
-        fields.append("creative{id,name,body,title,image_url,thumbnail_url,object_url}")
-
+    # Note: Cannot include creative fields in insights call
+    # Will enrich with creative data after getting insights
+    
     df_ads = fetch_campaign_insights_optimized(
         level="ad",
         fields=fields,
@@ -316,7 +337,7 @@ def get_ad_performance_optimized(
         force_refresh=force_refresh
     )
 
-    # Additional creative enrichment if needed
+    # Enrich with creative data if requested
     if include_creatives and not df_ads.empty:
         df_ads = enrich_with_creative_data_batch(df_ads)
 

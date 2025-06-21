@@ -1,4 +1,3 @@
-
 """
 Enhanced fetch organic content insights from Facebook Pages and Instagram.
 Handles comprehensive Instagram Business Account insights with metadata-driven discovery.
@@ -21,7 +20,7 @@ from config import config
 logger = logging.getLogger(__name__)
 
 # Graph API version and base URL for consistent endpoint calls
-GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v21.0")  # Updated to latest
+GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v21.0")  # Updated to stable version
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
 # Import optimized API helpers
@@ -60,14 +59,14 @@ FALLBACK_IG_METRICS = {
     "saved": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
     "profile_visits": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
     "follows": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
-    
+
     # Video/Reels specific metrics (updated for 2025)
     "video_views": ["VIDEO"],
     "ig_reels_avg_watch_time": ["REEL"],
     "ig_reels_video_view_total_time": ["REEL"],
     "clips_replays_count": ["REEL"],
     "ig_reels_aggregated_all_plays_count": ["REEL"],
-    
+
     # Navigation and interaction metrics
     "navigation": ["REEL", "VIDEO"],
     "website_clicks": ["REEL", "VIDEO", "IMAGE", "CAROUSEL_ALBUM"],
@@ -141,7 +140,7 @@ def get_ig_follower_count(ig_user_id: str) -> Optional[int]:
         logger.info(f"Fetching follower count from: {url}")
         resp = requests.get(url, params=params, timeout=10)
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-        
+
         logger.info(f"Follower count API response: status={resp.status_code}, body={body}")
 
         if resp.status_code == 200 and "followers_count" in body:
@@ -191,7 +190,7 @@ def fetch_ig_user_insights(ig_user_id: str, metrics: List[str] = None, period: s
         logger.info(f"Fetching user insights from: {url} with params: {params}")
         resp = requests.get(url, params=params, timeout=10)
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-        
+
         logger.info(f"User insights API response: status={resp.status_code}, body={body}")
 
         if resp.status_code == 200 and "data" in body:
@@ -237,7 +236,7 @@ def fetch_media_insights_metadata(media_id: str) -> List[str]:
         logger.info(f"Fetching metadata from: {url}")
         resp = requests.get(url, params={"access_token": token}, timeout=10)
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-        
+
         logger.info(f"Metadata API response: status={resp.status_code}, body={body}")
 
         if resp.status_code == 200 and "data" in body:
@@ -308,7 +307,7 @@ def choose_metrics_for_media(media: Dict) -> List[str]:
     # Fallback based on media type when metadata unavailable
     media_key = product_type if product_type == "REEL" else media_type
     fallback = []
-    
+
     for metric, supported_types in FALLBACK_IG_METRICS.items():
         if media_key in supported_types or media_type in supported_types:
             fallback.append(metric)
@@ -316,11 +315,11 @@ def choose_metrics_for_media(media: Dict) -> List[str]:
     # Prioritize core metrics
     priority_order = ["reach", "total_interactions", "comments", "shares", "saved", "profile_visits"]
     final_fallback = []
-    
+
     for metric in priority_order:
         if metric in fallback:
             final_fallback.append(metric)
-    
+
     for metric in fallback:
         if metric not in final_fallback:
             final_fallback.append(metric)
@@ -360,7 +359,7 @@ def fetch_insights_for_media(media: Dict) -> List[Dict]:
 
     while to_try:
         metric_str = ",".join(to_try)
-        
+
         def api_call():
             url = f"{GRAPH_API_BASE}/{media_id}/insights"
             params = {"metric": metric_str, "access_token": token}
@@ -478,7 +477,7 @@ def fetch_ig_media_insights(ig_user_id: str, since: Optional[str] = None, until:
             logger.info(f"Fetching media list from: {url}")
             resp = requests.get(url, params=params, timeout=15)
             body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-            
+
             logger.info(f"Media list API response: status={resp.status_code}")
 
             if resp.status_code != 200 or "error" in body:

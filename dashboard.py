@@ -22,9 +22,10 @@ logger = logging.getLogger(__name__)
 # Import OpenAI with error handling
 try:
     import openai
+    OPENAI_AVAILABLE = True
 except ImportError:
-    st.error("Missing `openai` package. Please install with `pip install openai`.")
-    st.stop()
+    OPENAI_AVAILABLE = False
+    logger.warning("OpenAI package not available - AI features disabled")
 
 # Import our modules
 from fetch_organic import (
@@ -51,11 +52,18 @@ except ImportError as e:
 
 # Configure OpenAI
 openai_api_key = os.getenv("OPENAI_API_KEY")
-if openai_api_key:
-    openai.api_key = openai_api_key
-    logger.info("OpenAI API key configured")
+if openai_api_key and OPENAI_AVAILABLE:
+    try:
+        openai.api_key = openai_api_key
+        logger.info("OpenAI API key configured")
+    except Exception as e:
+        logger.error(f"Failed to configure OpenAI: {e}")
+        OPENAI_AVAILABLE = False
 else:
-    logger.warning("OPENAI_API_KEY not set: AI commentary disabled")
+    if not OPENAI_AVAILABLE:
+        logger.warning("OpenAI package not installed")
+    else:
+        logger.warning("OPENAI_API_KEY not set: AI commentary disabled")
 
 # Set page config
 st.set_page_config(
@@ -82,11 +90,14 @@ def cached_get_ig_follower_count(ig_user_id: str) -> Optional[int]:
 @st.cache_data(ttl=300)
 def cached_openai_commentary(media_id: str, context: str) -> str:
     """Cached OpenAI commentary to avoid repeated API calls"""
-    if not openai_api_key:
-        return "⚠️ OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."
+    if not openai_api_key or not OPENAI_AVAILABLE:
+        return "⚠️ OpenAI not available. Please install openai package and set OPENAI_API_KEY environment variable."
 
     try:
-        response = openai.ChatCompletion.create(
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_api_key)
+        
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {
@@ -226,15 +237,26 @@ def show_instagram_insights():
 
                 if df.empty:
                     st.warning("⚠️ No Instagram insights returned. This could be due to:")
-                    st.write("• Rate limiting (please wait and try again)")
-                    st.write("• Token permissions")
-                    st.write("• Instagram Business account linkage")
-                    st.write("• Date range with no data")
+                    st.write("• **Rate limiting** - Meta limits API calls per hour")
+                    st.write("• **Token permissions** - Check pages_read_engagement & instagram_manage_insights scopes")
+                    st.write("• **Instagram Business account** - Ensure account is properly linked")
+                    st.write("• **Date range** - No content published in selected period")
                     
                     # Show API usage stats
                     api_stats = get_api_stats()
                     if api_stats['total_calls'] > 150:
-                        st.warning(f"⚠️ High API usage detected: {api_stats['total_calls']} calls in {api_stats['session_duration_minutes']:.1f} minutes")
+                        st.error(f"🚫 High API usage: {api_stats['total_calls']} calls in {api_stats['session_duration_minutes']:.1f} minutes")
+                        st.info("**Recommendation:** Wait 1 hour before making more requests, or use cached data")
+                    
+                    # Show troubleshooting tips
+                    with st.expander("🔧 Troubleshooting Tips"):
+                        st.write("1. **Check token scopes** in Meta Developer console")
+                        st.write("2. **Verify Instagram Business account** is connected to Facebook Page")
+                        st.write("3. **Try a different date range** with known content")
+                        st.write("4. **Check API limits** - Meta allows ~200 calls per hour")
+                        if 'last_fetch_time' in st.session_state:
+                            last_fetch = st.session_state.last_fetch_time
+                            st.write(f"5. **Last successful fetch:** {last_fetch.strftime('%Y-%m-%d %H:%M:%S')}")
                     return
 
                 # Limit posts if requested
@@ -449,7 +471,7 @@ def show_instagram_insights():
 
     # AI Commentary
     with st.expander("🤖 AI Commentary & Recommendations"):
-        if openai_api_key:
+        if openai_api_key and OPENAI_AVAILABLE:
             # Prepare context for AI
             # Calculate engagement rate
             if follower_count and follower_count > 0:
@@ -461,7 +483,7 @@ def show_instagram_insights():
             context = f"""
             Post Date: {pd.to_datetime(post_info['timestamp']).strftime('%Y-%m-%d')}
             Media Type: {post_info['media_type']} / {post_info['media_product_type']}
-            Caption: {caption[:200]}...
+            Caption: {caption[:200] if caption else 'No caption'}
 
             Key Metrics:
             - Reach: {metrics_map.get('reach', 0):,}
@@ -475,10 +497,17 @@ def show_instagram_insights():
             Engagement Rate: {engagement_rate_str}
             """
 
-            ai_commentary = cached_openai_commentary(selected_media_id, context)
-            st.write(ai_commentary)
+            try:
+                ai_commentary = cached_openai_commentary(selected_media_id, context)
+                st.write(ai_commentary)
+            except Exception as e:
+                st.error(f"Failed to generate AI commentary: {str(e)}")
+                logger.error(f"AI commentary error: {e}")
         else:
-            st.warning("⚠️ OpenAI API key not configured. Set OPENAI_API_KEY environment variable to enable AI commentary.")
+            if not OPENAI_AVAILABLE:
+                st.warning("⚠️ OpenAI package not installed. Install with: `pip install openai`")
+            else:
+                st.warning("⚠️ OpenAI API key not configured. Set OPENAI_API_KEY environment variable to enable AI commentary.")
 
     # Trends Over Time
     with st.expander("📈 Instagram Trends Over Time"):
@@ -614,35 +643,95 @@ def show_paid_campaign_insights():
                 creative_rows = paid_data[paid_data['creative_image_url'].notna()].head(5)
 
                 if not creative_rows.empty:
-                    for _, row in creative_rows.iterrows():
-                        with st.expander(f"Creative: {row.get('creative_name', 'Unnamed')}"):
-                            col1, col2 = st.columns([1, 2])
+                    # Show creatives in a grid layout
+                    for i, (_, row) in enumerate(creative_rows.iterrows()):
+                        with st.expander(f"🎨 {row.get('creative_name', f'Creative {i+1}')} - {row.get('campaign_name', 'Campaign')}"):
+                            col1, col2, col3 = st.columns([1, 2, 1])
 
                             with col1:
                                 if pd.notna(row.get('creative_image_url')):
                                     try:
-                                        st.image(row['creative_image_url'], caption="Creative Preview")
-                                    except:
-                                        st.text("Preview not available")
+                                        st.image(row['creative_image_url'], caption="Creative Preview", use_column_width=True)
+                                    except Exception as e:
+                                        st.error(f"Could not load image: {str(e)}")
+                                        if pd.notna(row.get('creative_thumbnail_url')):
+                                            try:
+                                                st.image(row['creative_thumbnail_url'], caption="Thumbnail", use_column_width=True)
+                                            except:
+                                                st.text("No preview available")
 
                             with col2:
                                 st.write(f"**Campaign:** {row.get('campaign_name', 'N/A')}")
-                                st.write(f"**Ad:** {row.get('ad_name', 'N/A')}")
-                                if pd.notna(row.get('creative_body')):
-                                    st.write(f"**Body:** {row.get('creative_body')}")
+                                st.write(f"**Ad Name:** {row.get('ad_name', 'N/A')}")
+                                
                                 if pd.notna(row.get('creative_title')):
                                     st.write(f"**Title:** {row.get('creative_title')}")
+                                    
+                                if pd.notna(row.get('creative_body')):
+                                    body_text = str(row.get('creative_body'))
+                                    if len(body_text) > 150:
+                                        st.write(f"**Body:** {body_text[:150]}...")
+                                        with st.expander("Show full text"):
+                                            st.text(body_text)
+                                    else:
+                                        st.write(f"**Body:** {body_text}")
+                                
+                                if pd.notna(row.get('creative_object_url')):
+                                    st.markdown(f"[🔗 Creative Link]({row.get('creative_object_url')})")
+
+                            with col3:
+                                # Show performance metrics for this creative
+                                st.metric("Impressions", f"{int(row.get('impressions', 0)):,}")
+                                st.metric("Clicks", f"{int(row.get('clicks', 0)):,}")
+                                st.metric("Spend", f"${float(row.get('spend', 0)):.2f}")
+                                
+                                ctr = float(row.get('ctr', 0))
+                                st.metric("CTR", f"{ctr:.2f}%")
                 else:
                     st.info("No creative previews available for current campaigns.")
+                    st.write("**Possible reasons:**")
+                    st.write("• Creative data not fetched (check include_creatives setting)")
+                    st.write("• No image URLs available in creative objects")
+                    st.write("• Rate limiting prevented creative data fetch")
 
         except Exception as e:
             st.error(f"Error loading paid campaign data: {str(e)}")
             logger.error(f"Paid campaign error: {e}", exc_info=True)
 
+def validate_environment():
+    """Validate environment variables and show status"""
+    env_status = {
+        'PAGE_ID': bool(os.getenv('PAGE_ID')),
+        'IG_USER_ID': bool(os.getenv('IG_USER_ID')),
+        'PAGE_ACCESS_TOKEN': bool(os.getenv('PAGE_ACCESS_TOKEN')),
+        'META_ACCESS_TOKEN': bool(os.getenv('META_ACCESS_TOKEN')),
+        'AD_ACCOUNT_ID': bool(os.getenv('AD_ACCOUNT_ID')),
+        'OPENAI_API_KEY': bool(os.getenv('OPENAI_API_KEY')),
+    }
+    
+    missing_vars = [var for var, present in env_status.items() if not present]
+    
+    if missing_vars:
+        st.sidebar.warning(f"⚠️ Missing environment variables: {', '.join(missing_vars)}")
+        with st.sidebar.expander("Environment Setup Help"):
+            st.write("**Required for Instagram insights:**")
+            st.code("PAGE_ID, IG_USER_ID, PAGE_ACCESS_TOKEN")
+            st.write("**Required for paid campaigns:**")
+            st.code("AD_ACCOUNT_ID, META_ACCESS_TOKEN")
+            st.write("**Optional for AI features:**")
+            st.code("OPENAI_API_KEY")
+    else:
+        st.sidebar.success("✅ All environment variables configured")
+    
+    return env_status
+
 def main():
     """Main dashboard function"""
     st.title("🚀 AI-Powered Social Campaign Optimizer")
     st.markdown("*Comprehensive Instagram insights with AI-driven recommendations for 2025*")
+    
+    # Validate environment
+    env_status = validate_environment()
 
     # Create tabs for different sections
     tab1, tab2 = st.tabs(["📸 Instagram Insights", "💰 Paid Campaigns"])
