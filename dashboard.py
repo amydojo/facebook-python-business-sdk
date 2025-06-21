@@ -1,3 +1,4 @@
+
 """
 AI-Powered Social Campaign Optimizer Dashboard
 Enhanced with comprehensive Instagram insights, metadata-driven metrics, and AI commentary
@@ -76,17 +77,23 @@ st.set_page_config(
 
 from config import config
 
-# Logger already configured at top of file
-
 @st.cache_data(ttl=600)
 def cached_fetch_ig_media_insights(ig_user_id: str, since: str = None, until: str = None) -> pd.DataFrame:
     """Cached version of fetch_ig_media_insights with 10-minute TTL"""
-    return fetch_ig_media_insights(ig_user_id, since, until)
+    try:
+        return fetch_ig_media_insights(ig_user_id, since, until)
+    except Exception as e:
+        logger.error(f"Error in cached_fetch_ig_media_insights: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=1200)
 def cached_get_ig_follower_count(ig_user_id: str) -> Optional[int]:
     """Cached version of get_ig_follower_count with 20-minute TTL"""
-    return get_ig_follower_count(ig_user_id)
+    try:
+        return get_ig_follower_count(ig_user_id)
+    except Exception as e:
+        logger.error(f"Error in cached_get_ig_follower_count: {e}")
+        return None
 
 @st.cache_data(ttl=300)
 def cached_openai_commentary(media_id: str, context: str) -> str:
@@ -150,12 +157,28 @@ def compute_posting_insights(df: pd.DataFrame) -> Dict[str, Any]:
 
     # Convert timestamp to datetime
     df_copy = df.copy()
-    df_copy['datetime'] = pd.to_datetime(df_copy['timestamp'])
-    df_copy['weekday'] = df_copy['datetime'].dt.day_name()
-    df_copy['hour'] = df_copy['datetime'].dt.hour
+    try:
+        df_copy['datetime'] = pd.to_datetime(df_copy['timestamp'])
+        df_copy['weekday'] = df_copy['datetime'].dt.day_name()
+        df_copy['hour'] = df_copy['datetime'].dt.hour
+    except Exception as e:
+        logger.warning(f"Error parsing timestamps: {e}")
+        return {}
 
-    # Get engagement metrics per post
-    engagement_df = df_copy[df_copy['metric'] == 'total_interactions'].copy()
+    # Get engagement metrics per post - use available metrics
+    available_metrics = df_copy['metric'].unique()
+    
+    # Try to find engagement metrics
+    engagement_metric = None
+    for metric in ['total_interactions', 'likes', 'reach']:
+        if metric in available_metrics:
+            engagement_metric = metric
+            break
+    
+    if not engagement_metric:
+        return {}
+
+    engagement_df = df_copy[df_copy['metric'] == engagement_metric].copy()
     if engagement_df.empty:
         return {}
 
@@ -308,8 +331,11 @@ def show_instagram_insights():
 
         post_options = {}
         for _, row in df[['media_id', 'timestamp', 'caption']].drop_duplicates().iterrows():
-            date_str = pd.to_datetime(row['timestamp']).strftime("%Y-%m-%d")
-            caption_preview = (row['caption'][:50] + "...") if len(row['caption']) > 50 else row['caption']
+            try:
+                date_str = pd.to_datetime(row['timestamp']).strftime("%Y-%m-%d")
+            except:
+                date_str = "Unknown date"
+            caption_preview = (row['caption'][:50] + "...") if len(str(row['caption'])) > 50 else str(row['caption'])
             label = f"{date_str}: {caption_preview}"
             post_options[label] = row['media_id']
 
@@ -327,18 +353,22 @@ def show_instagram_insights():
 
         # Get selected post data
         post_df = df[df['media_id'] == selected_media_id]
+        if post_df.empty:
+            st.warning("No data for selected post")
+            return
+            
         post_info = post_df.iloc[0]
 
         # Media preview
         st.subheader("🎥 Media Preview")
 
-        media_url = post_info['media_url']
-        thumbnail_url = post_info['thumbnail_url']
-        media_type = post_info['media_type']
-        permalink = post_info['permalink']
+        media_url = post_info.get('media_url')
+        thumbnail_url = post_info.get('thumbnail_url')
+        media_type = post_info.get('media_type')
+        permalink = post_info.get('permalink')
 
         try:
-            if media_type == 'VIDEO' or post_info['media_product_type'] == 'REEL':
+            if media_type == 'VIDEO' or post_info.get('media_product_type') == 'REELS':
                 if media_url:
                     st.video(media_url)
                 elif thumbnail_url:
@@ -369,7 +399,15 @@ def show_instagram_insights():
             st.metric("Reach", f"{reach:,}")
 
         with metric_cols[1]:
+            # Try different interaction metrics
             interactions = metrics_map.get('total_interactions', 0)
+            if interactions == 0:
+                # Calculate from components
+                likes = metrics_map.get('likes', 0)
+                comments = metrics_map.get('comments', 0)
+                shares = metrics_map.get('shares', 0)
+                saves = metrics_map.get('saved', 0)
+                interactions = likes + comments + shares + saves
             st.metric("Interactions", f"{interactions:,}")
 
         with metric_cols[2]:
@@ -390,115 +428,120 @@ def show_instagram_insights():
 
     # KPIs and Analysis
     with st.expander("🎯 Computed KPIs & Engagement Analysis", expanded=True):
-        kpis = compute_instagram_kpis(post_df, follower_count)
+        try:
+            kpis = compute_instagram_kpis(post_df, follower_count)
 
-        if kpis:
-            kpi_cols = st.columns(3)
+            if kpis:
+                kpi_cols = st.columns(3)
 
-            with kpi_cols[0]:
-                if 'engagement_rate_by_reach' in kpis:
-                    st.metric("Engagement Rate (Reach)", f"{kpis['engagement_rate_by_reach']:.2f}%")
+                with kpi_cols[0]:
+                    if 'engagement_rate_by_reach' in kpis:
+                        st.metric("Engagement Rate (Reach)", f"{kpis['engagement_rate_by_reach']:.2f}%")
 
-                if 'save_rate' in kpis:
-                    st.metric("Save Rate", f"{kpis['save_rate']:.2f}%")
+                    if 'save_rate' in kpis:
+                        st.metric("Save Rate", f"{kpis['save_rate']:.2f}%")
 
-            with kpi_cols[1]:
-                if 'profile_visit_rate' in kpis:
-                    st.metric("Profile Visit Rate", f"{kpis['profile_visit_rate']:.2f}%")
+                with kpi_cols[1]:
+                    if follower_count:
+                        st.metric("Follower Count", f"{follower_count:,}")
 
-                if 'follow_rate' in kpis:
-                    st.metric("Follow Rate", f"{kpis['follow_rate']:.2f}%")
-
-            with kpi_cols[2]:
-                if follower_count:
-                    st.metric("Follower Count", f"{follower_count:,}")
-
-                if 'avg_reels_watch_time' in kpis and kpis['avg_reels_watch_time'] > 0:
-                    st.metric("Avg Watch Time", f"{kpis['avg_reels_watch_time']:.1f}s")
+                with kpi_cols[2]:
+                    # Show available KPIs
+                    for key, value in kpis.items():
+                        if isinstance(value, (int, float)) and key not in ['follower_count', 'media_count']:
+                            if key.endswith('_rate'):
+                                st.metric(key.replace('_', ' ').title(), f"{value:.2f}%")
+                            else:
+                                st.metric(key.replace('_', ' ').title(), f"{value:,}")
+        except Exception as e:
+            st.warning(f"Could not compute KPIs: {e}")
 
         # Historical comparison
         st.subheader("📈 Historical Comparison")
 
-        posting_insights = compute_posting_insights(df)
-        if posting_insights:
-            comp_cols = st.columns(2)
+        try:
+            posting_insights = compute_posting_insights(df)
+            if posting_insights:
+                comp_cols = st.columns(2)
 
-            with comp_cols[0]:
-                current_engagement = interactions
-                avg_engagement = posting_insights.get('avg_engagement', 0)
+                with comp_cols[0]:
+                    avg_engagement = posting_insights.get('avg_engagement', 0)
 
-                if avg_engagement > 0:
-                    performance_vs_avg = ((current_engagement - avg_engagement) / avg_engagement) * 100
+                    if avg_engagement > 0:
+                        performance_vs_avg = ((interactions - avg_engagement) / avg_engagement) * 100
 
-                    if performance_vs_avg > 10:
-                        st.success(f"🎉 This post performs {performance_vs_avg:.1f}% above your average!")
-                    elif performance_vs_avg > 0:
-                        st.info(f"📊 This post performs {performance_vs_avg:.1f}% above average")
+                        if performance_vs_avg > 10:
+                            st.success(f"🎉 This post performs {performance_vs_avg:.1f}% above your average!")
+                        elif performance_vs_avg > 0:
+                            st.info(f"📊 This post performs {performance_vs_avg:.1f}% above average")
+                        else:
+                            st.warning(f"📉 This post performs {abs(performance_vs_avg):.1f}% below average")
                     else:
-                        st.warning(f"📉 This post performs {abs(performance_vs_avg):.1f}% below average")
-                else:
-                    st.info("Not enough historical data for comparison")
+                        st.info("Not enough historical data for comparison")
 
-            with comp_cols[1]:
-                if posting_insights.get('best_weekday'):
-                    st.info(f"🗓️ **Best posting day:** {posting_insights['best_weekday']}")
+                with comp_cols[1]:
+                    if posting_insights.get('best_weekday'):
+                        st.info(f"🗓️ **Best posting day:** {posting_insights['best_weekday']}")
 
-                if posting_insights.get('best_hour'):
-                    st.info(f"🕐 **Best posting hour:** {posting_insights['best_hour']}:00")
+                    if posting_insights.get('best_hour'):
+                        st.info(f"🕐 **Best posting hour:** {posting_insights['best_hour']}:00")
+        except Exception as e:
+            st.warning(f"Could not compute posting insights: {e}")
 
     # Caption Analysis
     with st.expander("✍️ Caption Analysis"):
-        caption = post_info['caption']
-        caption_analysis = analyze_caption(caption)
+        try:
+            caption = str(post_info.get('caption', ''))
+            caption_analysis = analyze_caption(caption)
 
-        cap_cols = st.columns(4)
+            cap_cols = st.columns(4)
 
-        with cap_cols[0]:
-            st.metric("Word Count", caption_analysis['word_count'])
+            with cap_cols[0]:
+                st.metric("Word Count", caption_analysis['word_count'])
 
-        with cap_cols[1]:
-            st.metric("Hashtags", caption_analysis['hashtag_count'])
+            with cap_cols[1]:
+                st.metric("Hashtags", caption_analysis['hashtag_count'])
 
-        with cap_cols[2]:
-            st.metric("Emojis", caption_analysis['emoji_count'])
+            with cap_cols[2]:
+                st.metric("Emojis", caption_analysis['emoji_count'])
 
-        with cap_cols[3]:
-            cta_status = "✅ Yes" if caption_analysis['has_cta'] else "❌ No"
-            st.metric("Has CTA", cta_status)
+            with cap_cols[3]:
+                cta_status = "✅ Yes" if caption_analysis['has_cta'] else "❌ No"
+                st.metric("Has CTA", cta_status)
 
-        if caption:
-            with st.expander("Full Caption"):
-                st.text(caption)
+            if caption:
+                with st.expander("Full Caption"):
+                    st.text(caption)
+        except Exception as e:
+            st.warning(f"Could not analyze caption: {e}")
 
     # AI Commentary
     with st.expander("🤖 AI Commentary & Recommendations"):
         if openai_api_key and OPENAI_AVAILABLE:
-            # Prepare context for AI
-            # Calculate engagement rate
-            if follower_count and follower_count > 0:
-                engagement_rate = ((metrics_map.get('total_interactions', 0) / follower_count) * 100)
-                engagement_rate_str = f"{engagement_rate:.2f}%"
-            else:
-                engagement_rate_str = "N/A"
-
-            context = f"""
-            Post Date: {pd.to_datetime(post_info['timestamp']).strftime('%Y-%m-%d')}
-            Media Type: {post_info['media_type']} / {post_info['media_product_type']}
-            Caption: {caption[:200] if caption else 'No caption'}
-
-            Key Metrics:
-            - Reach: {metrics_map.get('reach', 0):,}
-            - Total Interactions: {metrics_map.get('total_interactions', 0):,}
-            - Comments: {metrics_map.get('comments', 0):,}
-            - Shares: {metrics_map.get('shares', 0):,}
-            - Saves: {metrics_map.get('saved', 0):,}
-            - Profile Visits: {metrics_map.get('profile_visits', 0):,}
-            - Follower Count: {follower_count:,}
-
-            Engagement Rate: {engagement_rate_str}
-            """
-
             try:
+                # Prepare context for AI
+                if follower_count and follower_count > 0:
+                    engagement_rate = ((interactions / follower_count) * 100)
+                    engagement_rate_str = f"{engagement_rate:.2f}%"
+                else:
+                    engagement_rate_str = "N/A"
+
+                context = f"""
+                Post Date: {pd.to_datetime(post_info['timestamp']).strftime('%Y-%m-%d') if pd.notna(post_info['timestamp']) else 'Unknown'}
+                Media Type: {post_info.get('media_type', 'Unknown')} / {post_info.get('media_product_type', 'Unknown')}
+                Caption: {str(post_info.get('caption', ''))[:200] if post_info.get('caption') else 'No caption'}
+
+                Key Metrics:
+                - Reach: {metrics_map.get('reach', 0):,}
+                - Interactions: {interactions:,}
+                - Comments: {metrics_map.get('comments', 0):,}
+                - Shares: {metrics_map.get('shares', 0):,}
+                - Saves: {metrics_map.get('saved', 0):,}
+                - Follower Count: {follower_count:,}
+
+                Engagement Rate: {engagement_rate_str}
+                """
+
                 ai_commentary = cached_openai_commentary(selected_media_id, context)
                 st.write(ai_commentary)
             except Exception as e:
@@ -517,40 +560,43 @@ def show_instagram_insights():
             selected_metrics = st.multiselect(
                 "Select metrics to plot:",
                 options=available_metrics,
-                default=['reach', 'total_interactions'] if 'reach' in available_metrics else available_metrics[:2]
+                default=[m for m in ['reach', 'likes'] if m in available_metrics][:2]
             )
 
             if selected_metrics:
-                # Pivot data by date
-                plot_df = df[df['metric'].isin(selected_metrics)].copy()
-                plot_df['date'] = pd.to_datetime(plot_df['timestamp']).dt.date
+                try:
+                    # Pivot data by date
+                    plot_df = df[df['metric'].isin(selected_metrics)].copy()
+                    plot_df['date'] = pd.to_datetime(plot_df['timestamp']).dt.date
 
-                # Create pivot table
-                pivot_df = plot_df.pivot_table(
-                    index='date', 
-                    columns='metric', 
-                    values='value', 
-                    aggfunc='sum'
-                ).fillna(0)
+                    # Create pivot table
+                    pivot_df = plot_df.pivot_table(
+                        index='date', 
+                        columns='metric', 
+                        values='value', 
+                        aggfunc='sum'
+                    ).fillna(0)
 
-                # Create matplotlib figure
-                fig, ax = plt.subplots(figsize=(12, 6))
+                    # Create matplotlib figure
+                    fig, ax = plt.subplots(figsize=(12, 6))
 
-                for metric in selected_metrics:
-                    if metric in pivot_df.columns:
-                        ax.plot(pivot_df.index, pivot_df[metric], marker='o', label=metric, linewidth=2)
+                    for metric in selected_metrics:
+                        if metric in pivot_df.columns:
+                            ax.plot(pivot_df.index, pivot_df[metric], marker='o', label=metric, linewidth=2)
 
-                ax.set_title('Instagram Metrics Over Time', fontsize=16, fontweight='bold')
-                ax.set_xlabel('Date', fontsize=12)
-                ax.set_ylabel('Value', fontsize=12)
-                ax.legend()
-                ax.grid(True, alpha=0.3)
+                    ax.set_title('Instagram Metrics Over Time', fontsize=16, fontweight='bold')
+                    ax.set_xlabel('Date', fontsize=12)
+                    ax.set_ylabel('Value', fontsize=12)
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
 
-                # Rotate x-axis labels
-                plt.xticks(rotation=45)
-                plt.tight_layout()
+                    # Rotate x-axis labels
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
 
-                st.pyplot(fig)
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.warning(f"Could not create trend chart: {e}")
             else:
                 st.info("Select metrics to display the trend chart")
         else:
@@ -607,15 +653,15 @@ def show_paid_campaign_insights():
                 col1, col2, col3, col4 = st.columns(4)
 
                 with col1:
-                    total_spend = paid_data['spend'].astype(float).sum()
+                    total_spend = pd.to_numeric(paid_data['spend'], errors='coerce').sum()
                     st.metric("Total Spend", f"${total_spend:,.2f}")
 
                 with col2:
-                    total_impressions = paid_data['impressions'].astype(int).sum()
+                    total_impressions = pd.to_numeric(paid_data['impressions'], errors='coerce').sum()
                     st.metric("Total Impressions", f"{total_impressions:,}")
 
                 with col3:
-                    total_clicks = paid_data['clicks'].astype(int).sum()
+                    total_clicks = pd.to_numeric(paid_data['clicks'], errors='coerce').sum()
                     st.metric("Total Clicks", f"{total_clicks:,}")
 
                 with col4:
@@ -628,11 +674,11 @@ def show_paid_campaign_insights():
             # Format numeric columns for better display
             display_df = paid_data.copy()
             if 'spend' in display_df.columns:
-                display_df['spend'] = display_df['spend'].astype(float).round(2)
+                display_df['spend'] = pd.to_numeric(display_df['spend'], errors='coerce').round(2)
             if 'ctr' in display_df.columns:
-                display_df['ctr'] = display_df['ctr'].astype(float).round(3)
+                display_df['ctr'] = pd.to_numeric(display_df['ctr'], errors='coerce').round(3)
             if 'cpc' in display_df.columns:
-                display_df['cpc'] = display_df['cpc'].astype(float).round(3)
+                display_df['cpc'] = pd.to_numeric(display_df['cpc'], errors='coerce').round(3)
 
             st.dataframe(display_df, use_container_width=True)
 
@@ -700,17 +746,6 @@ def show_paid_campaign_insights():
                                     logger.debug(f"Metrics error: {e}")
                 else:
                     st.info("💡 No creative previews available for current campaigns.")
-                    with st.expander("🔍 Troubleshooting"):
-                        st.write("**Possible reasons:**")
-                        st.write("• Creative data not fetched (check include_creatives setting)")
-                        st.write("• No image URLs available in creative objects")
-                        st.write("• Rate limiting prevented creative data fetch")
-                        st.write("• Ads may not have image-based creatives")
-                        
-                        if not creative_rows.empty:
-                            st.write("**Available creative fields:**")
-                            creative_fields = [col for col in paid_data.columns if 'creative' in col]
-                            st.write(creative_fields)
 
         except Exception as e:
             st.error(f"Error loading paid campaign data: {str(e)}")

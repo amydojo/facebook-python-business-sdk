@@ -2,25 +2,9 @@
 Enhanced fetch paid advertising data from Facebook Marketing API.
 Uses facebook_business SDK for robust, paginated insights retrieval.
 
-Official docs:
-- Ads Insights API: https://developers.facebook.com/docs/marketing-api/insights/
-- Batch Requests: https://developers.facebook.com/docs/marketing-api/best-practices/
-- Error Handling: https://developers.facebook.com/docs/marketing-api/error-handling/
-
-Updated with enhanced error handling, batch processing, and metric optimization
+Updated with cleaned field lists, improved creative handling, and better error management.
 """
 
-# Valid ad insight fields - status and creative fields removed to prevent 400 errors
-VALID_AD_INSIGHT_FIELDS = [
-    "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
-    "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
-    "unique_clicks", "unique_link_clicks_ctr", "cost_per_unique_click", 
-    "date_start", "date_stop", "actions", "action_values", "conversions",
-    "conversion_values", "cost_per_action_type", "video_30_sec_watched_actions",
-    "video_p25_watched_actions", "video_p50_watched_actions", "video_p75_watched_actions",
-    "video_p100_watched_actions", "video_play_actions", "outbound_clicks",
-    "unique_outbound_clicks", "inline_link_clicks", "unique_inline_link_clicks"
-]
 import os
 import requests
 import pandas as pd
@@ -35,12 +19,6 @@ from api_helpers import safe_api_call, batch_facebook_requests, get_api_stats, s
 
 # Import fb_client for API access
 from fb_client import fb_client
-try:
-    from fb_client import validate_credentials
-except ImportError:
-    def validate_credentials():
-        """Fallback validate_credentials if not available in fb_client"""
-        return True
 
 # Facebook Business SDK imports
 try:
@@ -56,19 +34,23 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
-# Valid Ads Insights fields based on official Meta Marketing API docs
-# https://developers.facebook.com/docs/marketing-api/reference/ads-insights/
-# NOTE: 'status' is not valid for insights fields - removed to prevent 400 errors
+# Valid ad insight fields - removed all unsupported fields based on API docs
+# Reference: https://developers.facebook.com/docs/marketing-api/reference/ads-insights/
+VALID_AD_INSIGHT_FIELDS = [
+    "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
+    "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
+    "date_start", "date_stop", "account_id", "account_name"
+]
+
+# Valid Ads Insights fields by level
 VALID_INSIGHT_FIELDS = {
     "campaign": [
-        "campaign_id", "campaign_name", "objective", "budget_rebalance_flag",
-        "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm", "cpp",
-        "unique_clicks", "unique_link_clicks_ctr", "cost_per_unique_click", "social_spend",
+        "campaign_id", "campaign_name", "objective",
+        "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
         "date_start", "date_stop", "account_id", "account_name"
     ],
     "adset": [
         "adset_id", "adset_name", "campaign_id", "campaign_name", "objective",
-        "optimization_goal", "billing_event", "bid_amount", "budget_remaining", "daily_budget",
         "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
         "date_start", "date_stop", "account_id"
     ],
@@ -81,19 +63,6 @@ def get_account_with_retries() -> Optional[AdAccount]:
         logger.error("❌ Facebook client not initialized")
         return None
     return fb_client.account
-
-def fetch_creative_details(ad_ids: List[str]) -> Dict[str, Dict]:
-    """
-    Fetch creative details for multiple ads using safe API calls.
-    This is now a wrapper around the optimized batch function.
-
-    Args:
-        ad_ids: List of ad IDs to fetch creative details for
-
-    Returns:
-        Dict mapping ad_id to creative details
-    """
-    return fetch_creatives_for_ads(ad_ids)
 
 def safe_fetch_insights(level: str, fields: List[str], params: Dict) -> pd.DataFrame:
     """
@@ -142,7 +111,7 @@ def safe_fetch_insights(level: str, fields: List[str], params: Dict) -> pd.DataF
         logger.warning("⚠️ No insights data returned")
         return pd.DataFrame()
 
-    # Process results - insights_data should already be processed by safe_api_call
+    # Process results
     all_data = []
     try:
         if isinstance(insights_data, list):
@@ -204,6 +173,97 @@ def get_campaign_performance_optimized(
 
     return safe_fetch_insights("campaign", fields, params)
 
+def fetch_creatives_for_ads(ad_ids: List[str]) -> Dict[str, Dict]:
+    """
+    Given a list of ad IDs, batch-fetch their creative details.
+    Returns a dict: {ad_id: {creative fields...}, ...}
+    """
+    if not CREATIVE_SDK_AVAILABLE or not ad_ids:
+        return {}
+
+    creatives_map = {}
+    BATCH_SIZE = 50
+
+    for i in range(0, len(ad_ids), BATCH_SIZE):
+        batch_ids = ad_ids[i:i + BATCH_SIZE]
+
+        # Fetch creatives individually for each ad in the batch
+        for ad_id in batch_ids:
+            try:
+                def get_ad_creative():
+                    ad = Ad(ad_id)
+                    creative_data = ad.api_get(fields=['creative'])
+                    # Handle different response types
+                    if isinstance(creative_data, dict):
+                        return creative_data
+                    elif hasattr(creative_data, 'export_all_data'):
+                        return creative_data.export_all_data()
+                    else:
+                        return {'creative': {'id': str(creative_data)}}
+
+                ad_info = safe_api_call(
+                    get_ad_creative,
+                    f"ad_{ad_id}",
+                    {},
+                    cache_ttl_hours=24
+                )
+
+                if ad_info and isinstance(ad_info, dict) and 'creative' in ad_info:
+                    creative_info = ad_info['creative']
+
+                    # Handle different creative response types
+                    creative_id = None
+                    if isinstance(creative_info, dict):
+                        creative_id = creative_info.get('id')
+                    elif isinstance(creative_info, str):
+                        creative_id = creative_info
+                    else:
+                        creative_id = str(creative_info)
+
+                    if creative_id:
+                        # Fetch the actual creative details
+                        def get_creative_details():
+                            try:
+                                creative = AdCreative(creative_id)
+                                creative_details = creative.api_get(fields=[
+                                    'id', 'name', 'body', 'title', 'image_url', 
+                                    'thumbnail_url', 'object_url'
+                                ])
+
+                                # Handle response type
+                                if isinstance(creative_details, dict):
+                                    return creative_details
+                                elif hasattr(creative_details, 'export_all_data'):
+                                    return creative_details.export_all_data()
+                                else:
+                                    return {'id': creative_id, 'name': f'Creative {creative_id}'}
+                            except Exception as e:
+                                logger.debug(f"Creative details fetch failed for {creative_id}: {e}")
+                                return {'id': creative_id, 'name': f'Creative {creative_id}'}
+
+                        creative_details = safe_api_call(
+                            get_creative_details,
+                            f"creative_{creative_id}",
+                            {},
+                            cache_ttl_hours=24
+                        )
+
+                        if creative_details and isinstance(creative_details, dict):
+                            creatives_map[ad_id] = creative_details
+                        else:
+                            creatives_map[ad_id] = {'id': creative_id, 'name': f'Creative {creative_id}'}
+                    else:
+                        creatives_map[ad_id] = {}
+                else:
+                    creatives_map[ad_id] = {}
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
+                creatives_map[ad_id] = {}
+
+    logger.info(f"✅ Fetched creative details for {len(creatives_map)}/{len(ad_ids)} ads")
+    return creatives_map
+
 def get_ad_performance_with_creatives(
     campaign_ids: List[str] = None,
     date_preset: str = "last_7d",
@@ -232,14 +292,14 @@ def get_ad_performance_with_creatives(
     else:
         params["date_preset"] = "last_7d"
 
-    # Fetch ad insights with validated fields (no creative fields)
+    # Fetch ad insights with validated fields
     fields = VALID_INSIGHT_FIELDS["ad"].copy()
     df_ads = safe_fetch_insights("ad", fields, params)
 
     # Enrich with creative data if requested and we have ads
     if include_creatives and not df_ads.empty and 'ad_id' in df_ads.columns:
         unique_ad_ids = df_ads['ad_id'].unique().tolist()
-        creative_data = fetch_creative_details(unique_ad_ids)
+        creative_data = fetch_creatives_for_ads(unique_ad_ids)
 
         if creative_data:
             # Merge creative data with performance data
@@ -307,11 +367,6 @@ def get_paid_insights(
     except Exception as e:
         logger.error(f"❌ Error fetching paid insights: {e}", exc_info=True)
         return pd.DataFrame()
-
-# Backward compatibility aliases
-def get_campaign_insights(*args, **kwargs):
-    """Alias for get_paid_insights"""
-    return get_paid_insights(*args, **kwargs)
 
 def get_campaign_performance_with_creatives(
     date_preset: str = "last_7d",
@@ -382,201 +437,6 @@ def get_campaign_performance_summary(
         logger.error(f"❌ Error generating performance summary: {e}", exc_info=True)
         return {'api_stats': get_api_stats()}
 
-def fetch_creatives_for_ads(ad_ids: List[str]) -> Dict[str, Dict]:
-    """
-    Given a list of ad IDs, batch-fetch their creative details in groups of 50.
-    Returns a dict: {ad_id: {creative fields...}, ...}
-    """
-    if not CREATIVE_SDK_AVAILABLE or not ad_ids:
-        return {}
-
-    creatives_map = {}
-    BATCH_SIZE = 50
-    
-    for i in range(0, len(ad_ids), BATCH_SIZE):
-        batch_ids = ad_ids[i:i + BATCH_SIZE]
-        
-        # Fetch creatives individually for each ad in the batch
-        for ad_id in batch_ids:
-            try:
-                def get_ad_creative():
-                    ad = Ad(ad_id)
-                    return ad.api_get(fields=['creative'])
-
-                ad_info = safe_api_call(
-                    get_ad_creative,
-                    f"ad_{ad_id}",
-                    {},
-                    cache_ttl_hours=24
-                )
-
-                if ad_info and isinstance(ad_info, dict) and 'creative' in ad_info:
-                    creative_info = ad_info['creative']
-                    
-                    if isinstance(creative_info, dict) and 'id' in creative_info:
-                        creative_id = creative_info['id']
-
-                        # Fetch the actual creative details
-                        def get_creative_details():
-                            creative = AdCreative(creative_id)
-                            return creative.api_get(fields=[
-                                'id', 'name', 'body', 'title', 'image_url', 
-                                'thumbnail_url', 'object_url', 'image_hash'
-                            ])
-
-                        creative_details = safe_api_call(
-                            get_creative_details,
-                            f"creative_{creative_id}",
-                            {},
-                            cache_ttl_hours=24
-                        )
-
-                        if creative_details and isinstance(creative_details, dict):
-                            creatives_map[ad_id] = creative_details
-                        else:
-                            creatives_map[ad_id] = {}
-                    else:
-                        creatives_map[ad_id] = {}
-                else:
-                    creatives_map[ad_id] = {}
-
-            except Exception as e:
-                logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
-                creatives_map[ad_id] = {}
-
-    logger.info(f"✅ Fetched creative details for {len(creatives_map)}/{len(ad_ids)} ads")
-    return creatives_map
-
-def fetch_creative_for_ad(ad_id: str) -> List[Dict]:
-    """
-    Fetch creative details for a specific ad ID using safe API calls.
-    This is now a wrapper around the batch function for backward compatibility.
-
-    Args:
-        ad_id: Ad ID to fetch creative for
-
-    Returns:
-        List of creative dictionaries
-    """
-    creatives_map = fetch_creatives_for_ads([ad_id])
-    creative_data = creatives_map.get(ad_id, {})
-    return [creative_data] if creative_data else []
-    
-def fetch_ad_insights_fields(account_id: str, level: str, fields: List[str], 
-                                date_preset: Optional[str] = None, 
-                                since: Optional[str] = None, 
-                                until: Optional[str] = None,
-                                params_extra: Optional[Dict[str, Any]] = None) -> List[Dict]:
-    """
-    Fetch ad insights using facebook_business SDK with enhanced error handling.
-
-    Args:
-        account_id: Ad account ID
-        level: 'campaign', 'adset', or 'ad'
-        fields: List of insight fields to fetch
-        date_preset: Preset like 'last_7d', 'yesterday'
-        since: Start date in YYYY-MM-DD format
-        until: End date in YYYY-MM-DD format
-        params_extra: Additional parameters
-
-    Returns:
-        List of insight records as dictionaries
-    """
-    if not validate_credentials():
-        logger.error("❌ Invalid credentials for paid insights")
-        return []
-
-    # Filter out invalid fields to prevent 400 errors
-    valid_fields_set = set(VALID_AD_INSIGHT_FIELDS)
-    filtered_fields = [f for f in fields if f in valid_fields_set]
-    invalid_fields = set(fields) - valid_fields_set
-
-    if invalid_fields:
-        logger.warning(f"⚠️ Removed invalid insight fields: {invalid_fields}")
-
-    if not filtered_fields:
-        logger.error("❌ No valid insight fields provided")
-        return []
-
-    # Ensure account_id has proper prefix
-    account_id = account_id if account_id.startswith("act_") else f"act_{account_id}"
-
-    try:
-        account = AdAccount(account_id)
-
-        # Build insight parameters
-        insight_params = {
-            "level": level,
-            "fields": ",".join(filtered_fields)
-        }
-
-        # Add date range
-        if date_preset:
-            insight_params["date_preset"] = date_preset
-        elif since and until:
-            insight_params["time_range"] = json.dumps({
-                "since": since,
-                "until": until
-            })
-
-        # Add extra parameters
-        if params_extra:
-            insight_params.update(params_extra)
-
-        logger.info(f"🎯 Fetching {level} insights for account {account_id}")
-        logger.debug(f"📋 Insight parameters: {insight_params}")
-
-        # Make SDK call with retry logic
-        insights = sdk_call_with_backoff(
-            account.get_insights,
-            params=insight_params
-        )
-
-        if not insights:
-            logger.warning(f"⚠️ No insights returned for account {account_id}")
-            return []
-
-        # Use safe_api_call to handle SDK objects properly
-        def get_insights():
-            return account.get_insights(params=insight_params)
-
-        results = safe_api_call(
-            get_insights,
-            f"insights_{level}_{account_id}",
-            insight_params,
-            cache_ttl_hours=2
-        )
-
-        if not results:
-            logger.warning(f"⚠️ No insights returned for account {account_id}")
-            return []
-
-        if isinstance(results, list):
-            logger.info(f"✅ Successfully fetched {len(results)} {level} insight records")
-            return results
-        else:
-            logger.warning(f"Unexpected results format: {type(results)}")
-            return []
-
-    except FacebookRequestError as e:
-        error_code = e.api_error_code()
-        error_message = e.api_error_message()
-        logger.error(f"❌ Facebook API error (code {error_code}): {error_message}")
-
-        # Handle specific error cases
-        if error_code == 17:  # User request limit reached
-            logger.warning("⏳ Rate limit reached, consider implementing backoff")
-        elif error_code == 190:  # Access token issues
-            logger.error("🔑 Access token error - check token validity")
-        elif error_code == 100:  # Invalid parameter
-            logger.error(f"📋 Invalid parameters: {insight_params}")
-
-        return []
-
-    except Exception as e:
-        logger.error(f"❌ Unexpected error fetching {level} insights: {e}", exc_info=True)
-        return []
-    
 def compute_paid_kpis(df: pd.DataFrame) -> Dict:
     """
     Compute key performance indicators (KPIs) from a DataFrame of paid ad insights.
@@ -586,21 +446,18 @@ def compute_paid_kpis(df: pd.DataFrame) -> Dict:
     Returns:
         A dictionary containing computed KPIs.
     """
-
     # Initialize default values for KPIs
     total_spend = 0
     total_impressions = 0
     total_clicks = 0
     total_reach = 0
-    total_conversions = 0
 
     if df.empty:
         return {
             'total_spend': total_spend,
             'total_impressions': total_impressions,
             'total_clicks': total_clicks,
-            'total_reach': total_reach,
-            'total_conversions': total_conversions
+            'total_reach': total_reach
         }
 
     # Aggregate metrics, handling potential missing columns and data types
@@ -609,24 +466,13 @@ def compute_paid_kpis(df: pd.DataFrame) -> Dict:
         total_impressions = df['impressions'].astype(int).sum() if 'impressions' in df else 0
         total_clicks = df['clicks'].astype(int).sum() if 'clicks' in df else 0
         total_reach = df['reach'].astype(int).sum() if 'reach' in df else 0
-        total_conversions = df['conversions'].astype(int).sum() if 'conversions' in df else 0
-    except KeyError as e:
-        logger.error(f"Missing column in DataFrame: {e}")
+    except (KeyError, ValueError) as e:
+        logger.error(f"Error converting columns to numeric: {e}")
         return {
             'total_spend': 0,
             'total_impressions': 0,
             'total_clicks': 0,
-            'total_reach': 0,
-            'total_conversions': 0
-        }
-    except ValueError as e:
-        logger.error(f"Error converting column to numeric type: {e}")
-        return {
-            'total_spend': 0,
-            'total_impressions': 0,
-            'total_clicks': 0,
-            'total_reach': 0,
-            'total_conversions': 0
+            'total_reach': 0
         }
 
     # Compute additional metrics
@@ -639,7 +485,6 @@ def compute_paid_kpis(df: pd.DataFrame) -> Dict:
         'total_impressions': total_impressions,
         'total_clicks': total_clicks,
         'total_reach': total_reach,
-        'total_conversions': total_conversions,
         'ctr': round(ctr, 2),
         'cpc': round(cpc, 2),
         'cpm': round(cpm, 2)
@@ -647,6 +492,11 @@ def compute_paid_kpis(df: pd.DataFrame) -> Dict:
 
     logger.info(f"Computed KPIs: {kpis}")
     return kpis
+
+# Backward compatibility aliases
+def get_campaign_insights(*args, **kwargs):
+    """Alias for get_paid_insights"""
+    return get_paid_insights(*args, **kwargs)
 
 if __name__ == "__main__":
     # Test corrected paid insights

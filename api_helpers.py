@@ -1,4 +1,3 @@
-
 """
 api_helpers.py
 
@@ -31,7 +30,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Configuration via environment variables with defaults
-API_VERSION = os.getenv("GRAPH_API_VERSION", "v21.0")
+API_VERSION = os.getenv("GRAPH_API_VERSION", "v23.0")  # Updated to latest stable version
 GRAPH_API_BASE = f"https://graph.facebook.com/{API_VERSION}"
 MAX_RETRIES = int(os.getenv("API_HELPERS_MAX_RETRIES", "3"))
 BACKOFF_BASE = float(os.getenv("API_HELPERS_BACKOFF_BASE", "2.0"))
@@ -56,18 +55,21 @@ SESSION_START = datetime.now()
 
 def init_cache_db():
     """Initialize SQLite cache database."""
-    conn = sqlite3.connect(CACHE_DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS api_cache (
-            cache_key TEXT PRIMARY KEY,
-            data TEXT,
-            expires_at TEXT,
-            created_at TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(CACHE_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_cache (
+                cache_key TEXT PRIMARY KEY,
+                data TEXT,
+                expires_at TEXT,
+                created_at TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Failed to initialize cache database: {e}")
 
 def get_cache_key(endpoint: str, params: Dict) -> str:
     """Generate cache key from endpoint and parameters."""
@@ -81,7 +83,7 @@ def get_cached_data(cache_key: str) -> Optional[Dict]:
     """Retrieve cached data if not expired."""
     if not CACHE_ENABLED:
         return None
-    
+
     try:
         conn = sqlite3.connect(CACHE_DB_PATH)
         cursor = conn.cursor()
@@ -114,11 +116,11 @@ def set_cached_data(cache_key: str, data: Any, ttl_hours: int = 1):
     """Store data in cache with TTL."""
     if not CACHE_ENABLED:
         return
-    
+
     try:
         # Test JSON serialization
         json.dumps(data, default=str)
-        
+
         conn = sqlite3.connect(CACHE_DB_PATH)
         cursor = conn.cursor()
         expires_at = datetime.now() + timedelta(hours=ttl_hours)
@@ -221,7 +223,7 @@ def safe_api_call(
                         raise Exception(f"API error: {error_msg}")
                     except ValueError:
                         raise Exception(f"HTTP {result.status_code}: {result.text}")
-                
+
                 try:
                     parsed_result = result.json()
                 except ValueError:
@@ -248,18 +250,18 @@ def safe_api_call(
                     else:
                         # Already serializable
                         data_to_return = parsed_result
-                    
+
                     # Cache the serializable data
                     if use_cache:
                         set_cached_data(cache_key, data_to_return, cache_ttl_hours)
-                    
+
                     return data_to_return
-                        
+
                 except Exception as cache_error:
                     logger.warning(f"Failed to process SDK objects: {cache_error}")
                     # Return the original result
                     return parsed_result
-            
+
             return parsed_result
 
         except Exception as e:
@@ -589,10 +591,10 @@ def batch_facebook_requests(requests_list: list, batch_size: int = 50) -> list:
 
         try:
             logger.info(f"Processing batch {i//batch_size + 1} with {len(batch)} requests")
-            
+
             def batch_call():
                 return FacebookAdsApi.get_default_api().call_multiple(batch)
-            
+
             batch_responses = safe_api_call(
                 batch_call,
                 f"batch_request_{i//batch_size}",
@@ -613,7 +615,4 @@ def batch_facebook_requests(requests_list: list, batch_size: int = 50) -> list:
     return results
 
 # Initialize cache on import
-try:
-    init_cache_db()
-except Exception as e:
-    logger.warning(f"Failed to initialize cache database: {e}")
+init_cache_db()

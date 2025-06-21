@@ -1,3 +1,4 @@
+
 """
 Facebook Business SDK client initialization.
 Official docs: https://developers.facebook.com/docs/business-sdk/getting-started/
@@ -24,19 +25,13 @@ logger = logging.getLogger(__name__)
 
 def validate_environment_vars():
     """
-    Check that all required environment variables and tokens for Meta and IG are present.
-    Raises RuntimeError if any required variable is missing.
+    Check that required environment variables for paid insights are present.
+    Returns list of missing variables.
     """
     missing = []
     required_vars = [
         "META_ACCESS_TOKEN",
-        "AD_ACCOUNT_ID", 
-        "PAGE_ID",
-        "IG_USER_ID",
-        "PAGE_ACCESS_TOKEN",
-        "META_APP_ID",
-        "META_APP_SECRET",
-        "OPENAI_API_KEY"
+        "AD_ACCOUNT_ID"
     ]
 
     for var in required_vars:
@@ -44,12 +39,11 @@ def validate_environment_vars():
             missing.append(var)
 
     if missing:
-        msg = f"Missing required environment variables: {', '.join(missing)}"
-        logger.error(msg)
-        raise RuntimeError(msg)
-
-    logger.info("fb_client: All required credentials are set.")
-    return True
+        logger.warning(f"Missing environment variables: {', '.join(missing)}")
+    else:
+        logger.info("All required credentials are set.")
+    
+    return missing
 
 # Log import paths to confirm correct SDK loading
 if SDK_AVAILABLE:
@@ -127,11 +121,20 @@ class FacebookClient:
         try:
             # Simple API call to test connection
             account_info = self.account.api_get(fields=["name", "account_status", "currency"])
+            
+            # Handle different response types
+            if hasattr(account_info, 'export_all_data'):
+                account_data = account_info.export_all_data()
+            elif isinstance(account_info, dict):
+                account_data = account_info
+            else:
+                account_data = {"name": "Unknown", "account_status": "UNKNOWN", "currency": "USD"}
+            
             return {
                 "success": True,
-                "account_name": account_info.get("name"),
-                "account_status": account_info.get("account_status"),
-                "currency": account_info.get("currency")
+                "account_name": account_data.get("name"),
+                "account_status": account_data.get("account_status"),
+                "currency": account_data.get("currency")
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -145,7 +148,10 @@ def validate_credentials():
     """
     try:
         # First check environment variables
-        validate_environment_vars()
+        missing_vars = validate_environment_vars()
+        if missing_vars:
+            logger.error(f"Missing required environment variables: {missing_vars}")
+            return False
         
         # Check if client is initialized
         if not fb_client.is_initialized():
@@ -170,10 +176,13 @@ fb_client = FacebookClient()
 
 if __name__ == "__main__":
     # Test initialization
+    print(f"SDK available: {SDK_AVAILABLE}")
     print(f"fb_client initialized: {fb_client.is_initialized()}")
     if fb_client.is_initialized():
         test_result = fb_client.test_connection()
         print(f"Connection test: {test_result}")
+        print(f"Credentials valid: {validate_credentials()}")
     else:
         print("fb_client not initialized - check environment variables")
-    print(f"SDK available: {SDK_AVAILABLE}")
+        missing = validate_environment_vars()
+        print(f"Missing variables: {missing}")
