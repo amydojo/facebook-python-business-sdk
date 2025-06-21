@@ -49,12 +49,12 @@ FALLBACK_PAGE_METRICS = [
     "page_fan_removes"
 ]
 
-# Updated Instagram metrics for 2025 - removed deprecated metrics like 'plays' and 'clips_replays_count'
+# Updated Instagram metrics for 2025 - removed all deprecated metrics
 SUPPORTED_METRICS_BY_PRODUCT = {
     "REELS": [
         "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", 
-        "ig_reels_aggregated_all_plays_count", "views", "likes", "comments", 
-        "shares", "saved", "profile_visits", "follows", "reach", "impressions"
+        "views", "likes", "comments", "shares", "saved", "profile_visits", 
+        "follows", "reach", "impressions"
     ],
     "FEED": [
         "impressions", "reach", "total_interactions", "likes", "comments", 
@@ -413,14 +413,27 @@ def fetch_insights_for_media(media: Dict) -> List[Dict]:
 
                 # Try to identify unsupported metric
                 unsupported = None
-                if "plays metric" in msg and "no longer supported" in msg:
-                    unsupported = "plays"
-                else:
+                
+                # Common patterns for deprecated metrics
+                deprecated_patterns = [
+                    ("plays metric", "plays"),
+                    ("clips_replays_count", "clips_replays_count"),
+                    ("ig_reels_aggregated_all_plays_count", "ig_reels_aggregated_all_plays_count")
+                ]
+                
+                for pattern, metric_name in deprecated_patterns:
+                    if pattern in msg and "no longer supported" in msg:
+                        if metric_name in metrics:
+                            unsupported = metric_name
+                            break
+                
+                if not unsupported:
                     # Check each metric for presence in error message
                     for m in metrics:
                         if m in msg and ("no longer supported" in msg or "must be one of the following values" in msg):
                             unsupported = m
                             break
+                    
                     # If still none and pattern suggests first metric is invalid
                     if not unsupported and "metric" in msg and "must be one of the following values" in msg:
                         unsupported = metrics[0]

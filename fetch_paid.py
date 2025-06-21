@@ -10,17 +10,17 @@ Official docs:
 Updated with enhanced error handling, batch processing, and metric optimization
 """
 
-# Valid ad insight fields to prevent 400 errors
-VALID_AD_INSIGHT_FIELDS = {
+# Valid ad insight fields - status and creative fields removed to prevent 400 errors
+VALID_AD_INSIGHT_FIELDS = [
     "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
     "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
-    "unique_clicks", "unique_link_clicks", "cost_per_unique_click", 
+    "unique_clicks", "unique_link_clicks_ctr", "cost_per_unique_click", 
     "date_start", "date_stop", "actions", "action_values", "conversions",
     "conversion_values", "cost_per_action_type", "video_30_sec_watched_actions",
     "video_p25_watched_actions", "video_p50_watched_actions", "video_p75_watched_actions",
     "video_p100_watched_actions", "video_play_actions", "outbound_clicks",
     "unique_outbound_clicks", "inline_link_clicks", "unique_inline_link_clicks"
-}
+]
 import os
 import requests
 import pandas as pd
@@ -72,13 +72,7 @@ VALID_INSIGHT_FIELDS = {
         "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
         "date_start", "date_stop", "account_id"
     ],
-    "ad": [
-        "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
-        "impressions", "clicks", "spend", "reach", "frequency", "ctr", "cpc", "cpm",
-        "unique_clicks", "unique_link_clicks_ctr", "cost_per_unique_click",
-        "date_start", "date_stop", "account_id"
-        # NOTE: creative fields cannot be included in insights - must fetch separately
-    ]
+    "ad": VALID_AD_INSIGHT_FIELDS
 }
 
 def get_account_with_retries() -> Optional[AdAccount]:
@@ -91,6 +85,7 @@ def get_account_with_retries() -> Optional[AdAccount]:
 def fetch_creative_details(ad_ids: List[str]) -> Dict[str, Dict]:
     """
     Fetch creative details for multiple ads using safe API calls.
+    This is now a wrapper around the optimized batch function.
 
     Args:
         ad_ids: List of ad IDs to fetch creative details for
@@ -98,54 +93,7 @@ def fetch_creative_details(ad_ids: List[str]) -> Dict[str, Dict]:
     Returns:
         Dict mapping ad_id to creative details
     """
-    if not CREATIVE_SDK_AVAILABLE or not ad_ids:
-        return {}
-
-    creative_data = {}
-
-    for ad_id in ad_ids[:50]:  # Limit to 50 ads for safety
-        try:
-            def get_ad_creative():
-                ad = Ad(ad_id)
-                return ad.api_get(fields=['creative'])
-
-            ad_info = safe_api_call(
-                get_ad_creative,
-                f"ad_{ad_id}",
-                {},
-                cache_ttl_hours=24
-            )
-
-            if ad_info and isinstance(ad_info, dict) and 'creative' in ad_info:
-                creative_info = ad_info['creative']
-                
-                if isinstance(creative_info, dict) and 'id' in creative_info:
-                    creative_id = creative_info['id']
-
-                    # Fetch the actual creative details
-                    def get_creative_details():
-                        creative = AdCreative(creative_id)
-                        return creative.api_get(fields=[
-                            'id', 'name', 'body', 'title', 'image_url', 
-                            'thumbnail_url', 'object_url', 'image_hash'
-                        ])
-
-                    creative_details = safe_api_call(
-                        get_creative_details,
-                        f"creative_{creative_id}",
-                        {},
-                        cache_ttl_hours=24
-                    )
-
-                    if creative_details and isinstance(creative_details, dict):
-                        creative_data[ad_id] = creative_details
-
-        except Exception as e:
-            logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
-            continue
-
-    logger.info(f"✅ Fetched creative details for {len(creative_data)}/{len(ad_ids)} ads")
-    return creative_data
+    return fetch_creatives_for_ads(ad_ids)
 
 def safe_fetch_insights(level: str, fields: List[str], params: Dict) -> pd.DataFrame:
     """
@@ -434,9 +382,75 @@ def get_campaign_performance_summary(
         logger.error(f"❌ Error generating performance summary: {e}", exc_info=True)
         return {'api_stats': get_api_stats()}
 
+def fetch_creatives_for_ads(ad_ids: List[str]) -> Dict[str, Dict]:
+    """
+    Given a list of ad IDs, batch-fetch their creative details in groups of 50.
+    Returns a dict: {ad_id: {creative fields...}, ...}
+    """
+    if not CREATIVE_SDK_AVAILABLE or not ad_ids:
+        return {}
+
+    creatives_map = {}
+    BATCH_SIZE = 50
+    
+    for i in range(0, len(ad_ids), BATCH_SIZE):
+        batch_ids = ad_ids[i:i + BATCH_SIZE]
+        
+        # Fetch creatives individually for each ad in the batch
+        for ad_id in batch_ids:
+            try:
+                def get_ad_creative():
+                    ad = Ad(ad_id)
+                    return ad.api_get(fields=['creative'])
+
+                ad_info = safe_api_call(
+                    get_ad_creative,
+                    f"ad_{ad_id}",
+                    {},
+                    cache_ttl_hours=24
+                )
+
+                if ad_info and isinstance(ad_info, dict) and 'creative' in ad_info:
+                    creative_info = ad_info['creative']
+                    
+                    if isinstance(creative_info, dict) and 'id' in creative_info:
+                        creative_id = creative_info['id']
+
+                        # Fetch the actual creative details
+                        def get_creative_details():
+                            creative = AdCreative(creative_id)
+                            return creative.api_get(fields=[
+                                'id', 'name', 'body', 'title', 'image_url', 
+                                'thumbnail_url', 'object_url', 'image_hash'
+                            ])
+
+                        creative_details = safe_api_call(
+                            get_creative_details,
+                            f"creative_{creative_id}",
+                            {},
+                            cache_ttl_hours=24
+                        )
+
+                        if creative_details and isinstance(creative_details, dict):
+                            creatives_map[ad_id] = creative_details
+                        else:
+                            creatives_map[ad_id] = {}
+                    else:
+                        creatives_map[ad_id] = {}
+                else:
+                    creatives_map[ad_id] = {}
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
+                creatives_map[ad_id] = {}
+
+    logger.info(f"✅ Fetched creative details for {len(creatives_map)}/{len(ad_ids)} ads")
+    return creatives_map
+
 def fetch_creative_for_ad(ad_id: str) -> List[Dict]:
     """
     Fetch creative details for a specific ad ID using safe API calls.
+    This is now a wrapper around the batch function for backward compatibility.
 
     Args:
         ad_id: Ad ID to fetch creative for
@@ -444,37 +458,9 @@ def fetch_creative_for_ad(ad_id: str) -> List[Dict]:
     Returns:
         List of creative dictionaries
     """
-    try:
-        def get_ad_creatives():
-            ad = Ad(ad_id)
-            return ad.get_ad_creatives(fields=[
-                "id", "name", "body", "title", "image_url", 
-                "thumbnail_url", "object_url", "call_to_action_type"
-            ])
-
-        creatives_result = safe_api_call(
-            get_ad_creatives,
-            f"ad_creatives_{ad_id}",
-            {},
-            cache_ttl_hours=24
-        )
-
-        if not creatives_result:
-            logger.warning(f"No creatives returned for ad {ad_id}")
-            return []
-
-        # Handle different response formats
-        if isinstance(creatives_result, list):
-            return creatives_result
-        elif isinstance(creatives_result, dict):
-            return [creatives_result]
-        else:
-            logger.warning(f"Unexpected creative result format for ad {ad_id}: {type(creatives_result)}")
-            return []
-
-    except Exception as e:
-        logger.warning(f"Failed to fetch creative for ad {ad_id}: {e}")
-        return []
+    creatives_map = fetch_creatives_for_ads([ad_id])
+    creative_data = creatives_map.get(ad_id, {})
+    return [creative_data] if creative_data else []
     
 def fetch_ad_insights_fields(account_id: str, level: str, fields: List[str], 
                                 date_preset: Optional[str] = None, 
@@ -501,8 +487,9 @@ def fetch_ad_insights_fields(account_id: str, level: str, fields: List[str],
         return []
 
     # Filter out invalid fields to prevent 400 errors
-    filtered_fields = [f for f in fields if f in VALID_AD_INSIGHT_FIELDS]
-    invalid_fields = set(fields) - set(filtered_fields)
+    valid_fields_set = set(VALID_AD_INSIGHT_FIELDS)
+    filtered_fields = [f for f in fields if f in valid_fields_set]
+    invalid_fields = set(fields) - valid_fields_set
 
     if invalid_fields:
         logger.warning(f"⚠️ Removed invalid insight fields: {invalid_fields}")

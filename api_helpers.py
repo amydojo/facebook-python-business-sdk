@@ -227,33 +227,39 @@ def safe_api_call(
                 except ValueError:
                     raise Exception("Invalid JSON response")
 
-            # Cache the result
-            if use_cache and parsed_result is not None:
+            # Cache the result and process SDK objects
+            if parsed_result is not None:
                 # Convert result to dict if it's a Facebook SDK object
                 try:
                     if hasattr(parsed_result, 'export_all_data'):
                         # Single SDK object
-                        data_to_cache = parsed_result.export_all_data()
+                        data_to_return = parsed_result.export_all_data()
                     elif hasattr(parsed_result, '__iter__') and not isinstance(parsed_result, (str, dict)):
                         # Iterable of SDK objects
-                        data_to_cache = []
+                        data_to_return = []
                         for item in parsed_result:
                             if hasattr(item, 'export_all_data'):
-                                data_to_cache.append(item.export_all_data())
+                                data_to_return.append(item.export_all_data())
                             elif isinstance(item, (dict, str, int, float, bool, type(None))):
-                                data_to_cache.append(item)
+                                data_to_return.append(item)
                             else:
                                 logger.warning(f"Cannot serialize item type {type(item)}, converting to string")
-                                data_to_cache.append(str(item))
+                                data_to_return.append(str(item))
                     else:
                         # Already serializable
-                        data_to_cache = parsed_result
+                        data_to_return = parsed_result
+                    
+                    # Cache the serializable data
+                    if use_cache:
+                        set_cached_data(cache_key, data_to_return, cache_ttl_hours)
+                    
+                    return data_to_return
                         
-                    set_cached_data(cache_key, data_to_cache, cache_ttl_hours)
                 except Exception as cache_error:
-                    logger.warning(f"Failed to cache data: {cache_error}")
-                    # Continue without caching
-
+                    logger.warning(f"Failed to process SDK objects: {cache_error}")
+                    # Return the original result
+                    return parsed_result
+            
             return parsed_result
 
         except Exception as e:
