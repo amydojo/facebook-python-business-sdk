@@ -1,0 +1,481 @@
+Below are targeted fixes based on your latest logs and errors, focusing on:
+	1.	Removing unsupported “plays” metric from your curated lists, since as of v22+ it’s no longer valid.
+	2.	Refining the curated IG metrics for Reels/Video so you fetch only supported ones, avoiding repeated retry loops that always hit the “plays unsupported” error.
+	3.	Implementing or removing validate_credentials in fb_client.py so your import in __main__ succeeds.
+	4.	General robust retry/removal logic for IG insights so that if a metric is unsupported you parse the error once, remove it, and continue with the remaining set.
+
+Below are example patches/snippets. You will need to adapt paths or function names to your codebase, but the patterns show exactly how to fix the issues in your logs.
+
+⸻
+
+1. Fixing the curated IG metrics list (drop “plays”)
+
+In your fetch_organic.py (or wherever you define your fallback/curated metrics), replace any list that begins with 'plays' by removing it. For Reels the new curated list might be:
+
+# BEFORE (your logs used):
+# ['plays', 'ig_reels_video_view_total_time', 'ig_reels_avg_watch_time',
+#  'clips_replays_count', 'ig_reels_aggregated_all_plays_count', 'views',
+#  'likes', 'comments', 'shares', 'saved', 'profile_visits', 'follows']
+
+# AFTER:
+REELS_CURATED_METRICS = [
+    # 'plays',  # removed: unsupported v22+
+    "ig_reels_video_view_total_time",
+    "ig_reels_avg_watch_time",
+    "clips_replays_count",
+    "ig_reels_aggregated_all_plays_count",
+    "views",
+    "likes",
+    "comments",
+    "shares",
+    "saved",
+    "profile_visits",
+    "follows",
+]
+
+Similarly, for VIDEO (non-reel) or IMAGE you may have:
+
+VIDEO_CURATED_METRICS = [
+    "video_views",
+    "total_interactions",
+    "likes", "comments", "shares", "saved",
+    # do not include 'plays'
+]
+IMAGE_CURATED_METRICS = [
+    "impressions", "reach", "total_interactions",
+    "likes", "comments", "shares", "saved",
+]
+
+Then in your logic where you choose metrics for a media item:
+
+def get_valid_ig_metrics_for_media(media_type: str, media_product_type: str) -> list[str]:
+    # Uppercase to normalize
+    mt = (media_type or "").upper()
+    mpt = (media_product_type or "").upper()
+    if "REELS" in mpt:
+        return REELS_CURATED_METRICS.copy()
+    if mt == "VIDEO":
+        return VIDEO_CURATED_METRICS.copy()
+    if mt == "IMAGE":
+        return IMAGE_CURATED_METRICS.copy()
+    # fallback minimal
+    return ["impressions", "reach", "total_interactions"]
+
+With this, your initial fetch will no longer include “plays” at all, so you avoid the repeated “plays unsupported” errors. If in future any other metric becomes unsupported, you can remove it similarly from the curated list or add dynamic removal logic below.
+
+⸻
+
+2. Robust removal-on-error logic (one-pass) in fetch_insights_for_media
+
+Even with a curated list, some metrics may still be unsupported for a given media (e.g., older posts, or certain media types). You want a loop that:
+	•	Tries the full curated set once.
+	•	If error indicates one metric unsupported, remove only that metric and retry with the remainder.
+	•	Continue until either success or no metrics left.
+
+Example pattern in your fetch_organic.py:
+
+import logging
+import os
+
+def fetch_insights_for_media(media_id: str, since: str, until: str, initial_metrics: list[str]) -> list[dict]:
+    """
+    Fetch IG media insights for a single media item, with robust removal of unsupported metrics.
+    Returns flattened list of {media_id, metric, value, timestamp}.
+    """
+    metrics = initial_metrics.copy()
+    if not metrics:
+        return []
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights"
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    last_error = None
+
+    while metrics:
+        params = {
+            "metric": ",".join(metrics),
+            "since": since,
+            "until": until,
+            "access_token": token,
+        }
+        try:
+            result = api_helpers.http_get(url, params)
+        except Exception as e:
+            logging.warning("Media %s: insights fetch exception: %s", media_id, e)
+            return []
+
+        # Determine if result is error dict or valid data:
+        if isinstance(result, dict) and result.get("error"):
+            err = result["error"]
+            msg = err.get("message", "")
+            logging.warning("Media %s insights error: %s", media_id, msg)
+            last_error = msg
+            # Try to parse unsupported metric from message
+            # Common pattern: "(#100) Starting from version v22.0 and above, the plays metric is no longer supported..."
+            # Or "(#100) metric[0] must be one of the following values: impressions, reach,..."
+            # We look for a metric name in the message:
+            unsupported = None
+            # Check for “plays metric” phrase
+            if "plays metric" in msg:
+                unsupported = "plays"
+            else:
+                # Look for “metric[...] must be one of the following values” -> remove first metric from current list?
+                # Better: parse between quotes or check each metric:
+                for m in metrics:
+                    if m in msg and "no longer supported" in msg:
+                        unsupported = m
+                        break
+                # Or if message pattern “metric[0] must be one of...” and metrics[0] present:
+                if not unsupported and "metric" in msg and "must be one of the following values" in msg:
+                    # Often the API complains about the first metric in the list; remove that.
+                    unsupported = metrics[0]
+            if unsupported and unsupported in metrics:
+                logging.info("Removing unsupported metric '%s' and retrying", unsupported)
+                metrics.remove(unsupported)
+                continue
+            else:
+                logging.warning("Could not identify unsupported metric from error, aborting insights for media %s", media_id)
+                return []
+        # If result is list or dict with "data"
+        # Normalize:
+        if isinstance(result, dict) and isinstance(result.get("data"), list):
+            items = result["data"]
+        elif isinstance(result, list):
+            items = result
+        else:
+            # Unexpected shape
+            logging.debug("Media %s: unexpected insights result shape: %r", media_id, result)
+            return []
+        # Flatten:
+        flattened = []
+        for rec in items:
+            name = rec.get("name") or rec.get("metric") or rec.get("metric_name")
+            values_list = rec.get("values") or []
+            for v in values_list:
+                if isinstance(v, dict):
+                    val = v.get("value")
+                    timestamp = v.get("end_time") or v.get("period") or None
+                else:
+                    val = v
+                    timestamp = None
+                flattened.append({
+                    "media_id": media_id,
+                    "metric": name,
+                    "value": val,
+                    "timestamp": timestamp,
+                })
+        return flattened
+
+    # If loop exits (metrics empty)
+    logging.warning("No valid metrics left for media %s (last error: %s)", media_id, last_error)
+    return []
+
+	•	This tries the curated list first.
+	•	On error, attempts to parse “plays” or other unsupported metric, remove it, retry.
+	•	If it cannot identify which metric to remove, aborts early to avoid infinite loops.
+
+Replace your existing retry loop that always begins with “plays” so you avoid 3 attempts always failing on “plays”.
+
+⸻
+
+3. Fixing validate_credentials import in fb_client.py
+
+Your log shows:
+
+ERROR:__main__:❌ Failed to import paid insights functions: cannot import name 'validate_credentials' from 'fb_client'
+
+That means in your main (likely in dashboard.py or similar) you have:
+
+from fb_client import validate_credentials
+
+but fb_client.py does not define validate_credentials. You have two options:
+
+A. Remove or adjust that import if not needed
+
+If you no longer need validate_credentials, simply remove references in main:
+
+# In dashboard.py or __main__:
+# Remove or comment out:
+# from fb_client import validate_credentials
+# and any calls to validate_credentials(), unless you implement it below.
+
+B. Implement validate_credentials in fb_client.py
+
+If you want a function that checks required env vars/tokens and raises or logs if missing, add something like this to fb_client.py:
+
+import os
+import logging
+
+def validate_credentials():
+    """
+    Check that all required environment variables and tokens for Meta and IG are present.
+    Raises RuntimeError if any required variable is missing.
+    """
+    missing = []
+    # Adjust names to your code's expected vars
+    required = [
+        ("META_ACCESS_TOKEN", os.getenv("META_ACCESS_TOKEN")),
+        ("AD_ACCOUNT_ID", os.getenv("AD_ACCOUNT_ID")),
+        ("PAGE_ID", os.getenv("PAGE_ID")),
+        ("IG_USER_ID", os.getenv("IG_USER_ID")),
+        ("PAGE_ACCESS_TOKEN", os.getenv("PAGE_ACCESS_TOKEN")),
+        ("META_APP_ID", os.getenv("META_APP_ID")),
+        ("META_APP_SECRET", os.getenv("META_APP_SECRET")),
+        ("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY")),
+    ]
+    for name, val in required:
+        if not val:
+            missing.append(name)
+    if missing:
+        msg = f"Missing required environment variables: {', '.join(missing)}"
+        logging.error(msg)
+        raise RuntimeError(msg)
+    logging.info("All required credentials/env vars appear set.")
+    return True
+
+	•	Place this in fb_client.py.
+	•	Then in your main you can call:
+
+try:
+    validate_credentials()
+except RuntimeError as e:
+    st.error(f"Configuration error: {e}")
+    st.stop()
+
+or similar.
+
+Pick option A or B based on your design. If you simply imported validate_credentials by mistake, remove that import; if you want that check, implement it as above.
+
+⸻
+
+4. General paid-insights import error handling
+
+Your main shows repeatedly:
+
+ERROR:__main__:❌ Failed to import paid insights functions: cannot import name 'validate_credentials' from 'fb_client'
+
+After fixing the import (either define validate_credentials or remove its usage), ensure that in your fetch_paid or fb_client you properly expose the functions your main expects, e.g.:
+
+# In fb_client.py
+# If main expects functions like fetch_paid_insights or validate_credentials,
+# ensure you have e.g.:
+def fetch_paid_insights(...):
+    ...
+
+If main tries:
+
+from fb_client import validate_credentials, some_paid_func
+
+make sure those names exist in fb_client.
+
+⸻
+
+5. Putting it together in your codebase
+	1.	Apply curated metrics patch:
+	•	In fetch_organic.py, locate where you define fallback metrics. Replace with REELS_CURATED_METRICS, VIDEO_CURATED_METRICS, IMAGE_CURATED_METRICS as above.
+	•	Replace the naive retry loop with the robust removal logic shown.
+	2.	Apply validate_credentials in fb_client.py:
+	•	Either implement the function as above or remove references in main.
+	3.	Review imports in dashboard.py or __main__:
+	•	Remove stale imports or adjust to match the new function names.
+	4.	Re-run and check logs:
+	•	You should no longer see repeated “plays unsupported” errors for each media; now “plays” is never in the initial list.
+	•	You should no longer see cannot import name 'validate_credentials'.
+	•	If another metric becomes unsupported, the removal logic will remove it once and retry.
+	•	If metadata endpoint still returns 400, you correctly fallback to curated list and fetch only supported metrics.
+
+⸻
+
+6. Example Integration in fetch_organic.py
+
+Below is a concise example of how your media-insights loop might look after patching. Insert into your code replacing the previous fallback logic.
+
+# At top of fetch_organic.py
+import logging, os
+from api_helpers import http_get  # or your wrapper
+# Define GRAPH_API_VERSION somewhere in your config
+GRAPH_API_VERSION = "v23.0"
+
+REELS_CURATED_METRICS = [
+    "ig_reels_video_view_total_time",
+    "ig_reels_avg_watch_time",
+    "clips_replays_count",
+    "ig_reels_aggregated_all_plays_count",
+    "views",
+    "likes",
+    "comments",
+    "shares",
+    "saved",
+    "profile_visits",
+    "follows",
+]
+VIDEO_CURATED_METRICS = [
+    "video_views", "total_interactions",
+    "likes", "comments", "shares", "saved"
+]
+IMAGE_CURATED_METRICS = [
+    "impressions", "reach", "total_interactions",
+    "likes", "comments", "shares", "saved"
+]
+
+def get_valid_ig_metrics_for_media(media_type: str, media_product_type: str) -> list[str]:
+    mt = (media_type or "").upper()
+    mpt = (media_product_type or "").upper()
+    if "REELS" in mpt:
+        return REELS_CURATED_METRICS.copy()
+    if mt == "VIDEO":
+        return VIDEO_CURATED_METRICS.copy()
+    if mt == "IMAGE":
+        return IMAGE_CURATED_METRICS.copy()
+    return ["impressions", "reach", "total_interactions"]
+
+def fetch_insights_for_media(media_id: str, since: str, until: str, initial_metrics: list[str]) -> list[dict]:
+    metrics = initial_metrics.copy()
+    if not metrics:
+        return []
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}/insights"
+    token = os.getenv("PAGE_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
+    last_error = None
+    while metrics:
+        params = {
+            "metric": ",".join(metrics),
+            "since": since,
+            "until": until,
+            "access_token": token,
+        }
+        try:
+            result = http_get(url, params)
+        except Exception as e:
+            logging.warning("Media %s: insights exception: %s", media_id, e)
+            return []
+        # Check for Graph error in dict form
+        if isinstance(result, dict) and result.get("error"):
+            err = result["error"]
+            msg = err.get("message", "")
+            logging.warning("Media %s insights error: %s", media_id, msg)
+            last_error = msg
+            unsupported = None
+            # If the error explicitly mentions "plays metric is no longer supported"
+            if "plays metric" in msg:
+                unsupported = "plays"
+            else:
+                # Check each metric for presence in message + unsupported phrase
+                for m in metrics:
+                    if m in msg and ("no longer supported" in msg or "must be one of the following values" in msg):
+                        unsupported = m
+                        break
+                # If still none, and pattern "metric[0] must be one of ..." remove first
+                if not unsupported and "metric" in msg and "must be one of the following values" in msg:
+                    unsupported = metrics[0]
+            if unsupported and unsupported in metrics:
+                logging.info("Removing unsupported metric '%s' and retrying", unsupported)
+                metrics.remove(unsupported)
+                continue
+            else:
+                logging.warning("Cannot identify unsupported metric for media %s; aborting", media_id)
+                return []
+        # Normalize successful result
+        if isinstance(result, dict) and isinstance(result.get("data"), list):
+            items = result["data"]
+        elif isinstance(result, list):
+            items = result
+        else:
+            logging.debug("Media %s: unexpected insights shape: %r", media_id, result)
+            return []
+        # Flatten
+        flat = []
+        for rec in items:
+            name = rec.get("name") or rec.get("metric") or rec.get("metric_name")
+            for v in rec.get("values", []):
+                if isinstance(v, dict):
+                    val = v.get("value")
+                    timestamp = v.get("end_time") or v.get("period") or None
+                else:
+                    val = v
+                    timestamp = None
+                flat.append({
+                    "media_id": media_id,
+                    "metric": name,
+                    "value": val,
+                    "timestamp": timestamp,
+                })
+        return flat
+    # Out of loop => no metrics left
+    logging.warning("No metrics left for media %s (last error: %s)", media_id, last_error)
+    return []
+
+In your main wrapper (e.g., cached_fetch_ig_media_insights), call:
+
+@st.cache_data
+def cached_fetch_ig_media_insights(ig_user_id: str, since: str, until: str) -> pd.DataFrame:
+    media_list = fetch_media_list(ig_user_id, since, until)  # ensure this returns list of dicts with id, media_type, media_product_type
+    all_records = []
+    for media in media_list:
+        mid = media.get("id")
+        mt = media.get("media_type")
+        mpt = media.get("media_product_type")
+        metrics = get_valid_ig_metrics_for_media(mt, mpt)
+        recs = fetch_insights_for_media(mid, since, until, metrics)
+        all_records.extend(recs)
+    if not all_records:
+        return pd.DataFrame([], columns=["media_id","metric","value","timestamp"])
+    return pd.DataFrame(all_records)
+
+
+⸻
+
+4. Fix fb_client.py import issue
+
+In fb_client.py, add the following if you need validate_credentials:
+
+import os
+import logging
+
+def validate_credentials():
+    missing = []
+    required_vars = [
+        "META_ACCESS_TOKEN", "AD_ACCOUNT_ID", "PAGE_ID",
+        "IG_USER_ID", "PAGE_ACCESS_TOKEN",
+        "META_APP_ID", "META_APP_SECRET", "OPENAI_API_KEY"
+    ]
+    for var in required_vars:
+        if not os.getenv(var):
+            missing.append(var)
+    if missing:
+        msg = f"Missing required env vars: {', '.join(missing)}"
+        logging.error(msg)
+        raise RuntimeError(msg)
+    logging.info("fb_client: All required credentials are set.")
+    return True
+
+# Expose other functions that main expects, e.g.:
+# def fetch_paid_insights(...):
+#     ...
+
+Then in your main (e.g., dashboard.py):
+
+from fb_client import validate_credentials, fetch_paid_insights  # etc.
+
+# At startup:
+try:
+    validate_credentials()
+except RuntimeError as e:
+    st.error(f"Configuration error: {e}")
+    st.stop()
+
+If you do not want this check, simply remove the from fb_client import validate_credentials line and any calls to it.
+
+⸻
+
+5. After patch: re-run and check logs
+	•	IG media: you should see metadata fetch fail once, then “using curated metrics: […]” (without “plays”), then successful fetch or removal of any other unsupported metrics. The repeated “plays metric unsupported” should disappear.
+	•	Paid import error should disappear once validate_credentials is defined or import removed.
+	•	If future errors mention another metric unsupported, inspect and update curated lists or rely on the removal-in-loop logic above.
+
+⸻
+
+Summary
+	1.	Drop “plays” from your IG curated metrics.
+	2.	Use a single-pass removal loop in fetch_insights_for_media that parses the API error message to remove only the offending metric, then retries.
+	3.	Implement or remove validate_credentials in fb_client.py so the import error is fixed.
+	4.	Test by re-running your Streamlit app; inspect logs to confirm no more repeated “plays unsupported” errors, and that paid-insights import error is resolved.
+
+Apply these patches in your codebase; they directly address the errors shown in your logs. Let me know if further tweaks are needed!
