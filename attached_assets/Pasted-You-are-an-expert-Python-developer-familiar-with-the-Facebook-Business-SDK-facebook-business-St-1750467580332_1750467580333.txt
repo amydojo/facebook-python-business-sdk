@@ -1,0 +1,140 @@
+You are an expert Python developer familiar with the Facebook Business SDK (`facebook_business`), Streamlit dashboards, and robust API integration patterns. Your task is to analyze and patch a repository that fetches paid ad insights from Meta’s Marketing API. Specifically, the code in `fetch_paid.py` is producing errors like:
+
+    ERROR:api_helpers:API call failed for ad_<ID>: 'str' object has no attribute 'export_all_data'
+
+This indicates misuse of `.export_all_data()` on a string or incorrect object type. You also need to remove unsupported fields in Ads Insights calls (`creative{...}`, `status`, etc.), replace them with correct SDK calls using a safe API-call wrapper, and fetch creative details properly. Additionally, ensure any missing functions like `validate_credentials` in `fb_client.py` are implemented or imports adjusted.
+
+Perform the following steps automatically:
+
+1. **Locate and remove any `.export_all_data()` calls** in `fetch_paid.py` (or other modules). Replace with correct Facebook Business SDK patterns:
+   - Instead of calling `.export_all_data()` on strings or incorrect objects, instantiate an `Ad` object (`Ad(fbid=ad_id)`) and use `api_get(fields=[...])` to retrieve creative details, wrapped with a safe API-call helper.
+   - If the code attempted to fetch ad creative via something like `ad.get_ad_creative().export_all_data()`, replace with:
+     ```python
+     ad_obj = Ad(fbid=ad_id)
+     resp = safe_api_call(ad_obj, 'api_get', fields=['creative'])
+     if resp['success']:
+         creative_info = resp['data'].get('creative')
+         # Optionally fetch more fields from creative_info if it has an ID:
+         if isinstance(creative_info, dict) and 'id' in creative_info:
+             creative_id = creative_info['id']
+             creative_obj = AdCreative(fbid=creative_id)  # import facebook_business.adobjects.adcreative.AdCreative
+             creative_resp = safe_api_call(creative_obj, 'api_get', fields=[...list only allowed fields...])
+             # store creative_resp['data']
+     ```
+   - Ensure imports: `from facebook_business.adobjects.ad import Ad`, `from facebook_business.adobjects.adcreative import AdCreative`.
+
+2. **Remove unsupported fields from Ads Insights calls**:
+   - In any `get_insights` invocation in `fetch_paid.py`, remove nested fields like `creative{...}`, and remove fields not allowed by the Ads Insights API (e.g. `status`).
+   - Replace with a curated list of allowed insight fields, for example:
+     ```python
+     insight_fields = [
+         'ad_id','ad_name','adset_id','adset_name','campaign_id','campaign_name',
+         'impressions','clicks','spend','reach','ctr','cpc','cpm','frequency',
+         'date_start','date_stop'
+     ]
+     result = safe_api_call(account_obj, 'get_insights', params={'level':'ad','date_preset': date_preset}, fields=insight_fields)
+     ```
+   - After retrieving rows, loop over each `ad_id` to fetch creative details separately (see step 1).
+
+3. **Ensure a robust `safe_api_call` helper exists** in `api_helpers.py` or a shared module:
+   - If not present, insert a function like:
+     ```python
+     import time, logging
+     from facebook_business.exceptions import FacebookRequestError
+     logger = logging.getLogger(__name__)
+     def safe_api_call(obj, method_name: str, params: dict = None, fields: list = None, max_retries=3, backoff_factor=2):
+         attempt, wait = 0, 1
+         while attempt < max_retries:
+             try:
+                 if method_name == 'get_insights':
+                     resp = obj.get_insights(params=params, fields=fields)
+                     data = [page for page in resp]
+                     return {'success': True, 'data': data}
+                 elif method_name == 'api_get':
+                     resp = obj.api_get(fields=fields, params=params)
+                     return {'success': True, 'data': resp}
+                 else:
+                     func = getattr(obj, method_name)
+                     if fields is not None:
+                         resp = func(fields=fields, params=params)
+                     else:
+                         resp = func(params=params) if params is not None else func()
+                     return {'success': True, 'data': resp}
+             except FacebookRequestError as e:
+                 code, msg = e.api_error_code(), e.api_error_message()
+                 logger.warning(f"FBRequestError code={code}: {msg}")
+                 if code in (1,2,4,17,613):
+                     attempt += 1
+                     time.sleep(wait)
+                     wait *= backoff_factor
+                     continue
+                 return {'success': False, 'error': {'code': code, 'message': msg}}
+             except Exception as e:
+                 logger.exception("Unexpected error in safe_api_call")
+                 return {'success': False, 'error': {'code': None, 'message': str(e)}}
+         return {'success': False, 'error': {'code': None, 'message': 'Max retries exceeded'}}
+     ```
+   - If a similar helper already exists, modify it to match this pattern.
+
+4. **Implement or fix `validate_credentials` in `fb_client.py`** if referenced by `fetch_paid.py`:
+   - Example implementation:
+     ```python
+     from facebook_business.adobjects.adaccount import AdAccount
+     def validate_credentials():
+         try:
+             account = AdAccount(fbid=f'act_{AD_ACCOUNT_ID}')
+             resp = safe_api_call(account, 'get_insights', params={'level':'account','date_preset':'lifetime'}, fields=['account_id'])
+             return resp.get('success', False)
+         except Exception:
+             return False
+     ```
+   - Ensure necessary imports and that `AD_ACCOUNT_ID` is available.
+
+5. **Fix imports in `fetch_paid.py`**:
+   - Replace any `from fb_client import validate_credentials` if missing, or adjust to correct function names.
+   - Ensure `import openai` is present in `dashboard.py` if used.
+
+6. **Remove any `.status_code` checks on API responses** in all modules (`fetch_organic.py`, `fetch_paid.py`). Replace with checking the dict returned by `safe_api_call`.
+
+7. **Curate Instagram metrics in `fetch_organic.py`**:
+   - Use curated lists per media type/product type rather than trial-and-error against unsupported metrics.
+   - Example for Reels:
+     ```python
+     if media_product_type == 'REELS':
+         metrics = ['ig_reels_video_view_total_time','ig_reels_avg_watch_time','views','likes','comments','shares','saved']
+     ...
+     result = safe_api_call(IGMedia(fbid=media_id), 'get_insights', params={'metric':','.join(metrics),'period':'lifetime'})
+     # If error indicates removal needed, filter metrics based on error message and retry once.
+     ```
+   - Remove any `.status_code` logic and raw HTTP.
+
+8. **Update Streamlit UI imports/layout**:
+   - In `dashboard.py`, import `openai` before using.
+   - Fix nested `st.columns()` errors by flattening or using `st.tabs`.
+
+9. **Add logging around creative fetch**:
+   - After replacing `.export_all_data()`, log how many creatives fetched successfully vs. failures.
+
+10. **Test coverage snippet**:
+    - Insert a small test in `fetch_paid.py` (or separate script) to fetch insights and creative details for one ad to confirm no export_all_data misuse remains.
+
+11. **Batch fetching creatives (optional)**:
+    - If many ads, consider using `FacebookAdsApi.new_batch()` to group `api_get` calls for each ad’s creative in one HTTP batch request. Insert example code if desired.
+
+12. **Check & update dependencies**:
+    - Ensure `facebook_business` SDK is up-to-date.
+    - If using Graph API versions, adjust version in calls if necessary.
+
+13. **Commit changes**:
+    - After auto-generating patches, verify the code compiles/runs without the previous `'str' object has no attribute 'export_all_data'` error, and that paid insights with creative details now work.
+
+When applying these edits, the AI assistant should:
+
+- Parse `fetch_paid.py`, identify lines containing `.export_all_data()`, and replace them with the correct `safe_api_call` + `api_get` pattern.
+- Adjust `get_insights` calls to remove unsupported fields.
+- Insert or update import statements (`from facebook_business.adobjects.ad import Ad`, etc.).
+- Ensure `safe_api_call` is available (insert if missing).
+- Fix references to `validate_credentials` by adding that function in `fb_client.py` or removing its usage if not needed.
+- Return a diff or patched file content for `fetch_paid.py`, `api_helpers.py`, `fb_client.py`, `fetch_organic.py` as needed.
+
+Use the above instructions to automatically generate the code patches. After applying, run tests (e.g., fetch a single ad’s insights and creative) to confirm the fixes. Provide the patched file contents or diffs.
