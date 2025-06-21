@@ -1,0 +1,357 @@
+Below is a single comprehensive AI prompt you can feed to an assistant (e.g., ChatGPT, a Replit IDE AI, or another code-refactoring agent). It includes the key guidance and code snippets from our discussion, and explicitly tells the assistant what to do, module by module.
+
+You can copy-paste the entire block below as the prompt for the AI assistant:
+
+You are an expert Python developer and code-refactoring assistant. You have access to a codebase for a Streamlit dashboard that uses the Facebook Python Business SDK to fetch Instagram organic insights and Facebook paid ad insights. The repository contains modules like:
+- `fetch_organic.py`
+- `fetch_paid.py`
+- `api_helpers.py`
+- `fb_client.py`
+- `dashboard.py`
+- possibly other helpers.
+
+Currently, the code suffers from repeated failures:
+- Organic insights calls often 400 because unsupported metrics (e.g., `profile_visits`, `follows`, `clips_replays_count`, etc.) are being requested for certain media types (Reels, Feed videos, etc.).
+- The dynamic metadata approach (`/insights/metadata`) often returns 400, so the fallback logic tries many unsupported metrics and still fails.
+- Paid insights calls include invalid fields like `status` or nested `creative{...}`, causing `( #100 ) status is not valid for fields param`.
+- Creative fetching sometimes assumes the SDK object has `.export_all_data()`, but sometimes the return is a string or dict, causing `'str' object has no attribute 'export_all_data'`.
+- `fb_client.py` is missing functions like `validate_credentials` or they are imported but not implemented.
+- The Streamlit dashboard may crash when insights fetch returns `None` or empty, because error handling is incomplete.
+
+Your task: refactor the codebase modules to fix these problems once and for all, using a static mapping of supported metrics, robust error handling, simplified paid-insights fields, safe creative fetching, and proper fb_client initialization. Also add logging and graceful fallbacks so that if there is no data, the dashboard shows a message instead of crashing.
+
+Please modify the modules as follows:
+
+---
+
+## 1. `fetch_organic.py`
+
+1. **Replace dynamic metadata logic and trial-and-error across large metric lists** with a **static, minimal safe mapping** of supported metrics per `media_product_type` (e.g., FEED vs REELS). Use the official API docs to decide which metrics work for each type. For example:
+   ```python
+   # Static mapping: adapt after testing against your IG account.
+   SUPPORTED_METRICS_BY_PRODUCT = {
+       'FEED': ['impressions', 'reach', 'engagement', 'saved', 'comments', 'likes', 'shares'],
+       'REELS': ['impressions', 'reach', 'engagement', 'comments', 'likes', 'shares'],
+   }
+
+	•	For feed videos, you may optionally include 'video_views' if confirmed supported.
+	•	Remove any unsupported metrics like profile_visits, follows, clips_replays_count, etc., from the static lists.
+
+	2.	Implement a function fetch_insights_for_media(media: dict) -> Optional[dict] (or similar signature) that:
+	•	Extracts media_id = media['id'] and product_type = media.get('media_product_type', 'FEED').
+	•	Builds the metrics list via SUPPORTED_METRICS_BY_PRODUCT.get(product_type, SUPPORTED_METRICS_BY_PRODUCT['FEED']). If media['media_type']=='VIDEO' and product_type=='FEED', append 'video_views'.
+	•	Bulk-fetch: call IGMedia(media_id).get_insights(params={'metric': ','.join(metrics)}). If that returns a non-empty list of entries, collect entry['name'] → entry['values'] into a dict and return it.
+	•	If the bulk call fails with a FacebookRequestError (400 or similar), catch it, log a warning, then per-metric fallback: loop over the metrics list, call IGMedia(media_id).get_insights(params={'metric': metric}) individually, collect successes into a results dict, log unsupported metrics and remove or ignore them.
+	•	If no metric returns data, log a warning and return None.
+	•	Surround with try/except FacebookRequestError and general except Exception to avoid crashes.
+	3.	Remove any reliance on /insights/metadata calls that often 400. If you want to test metadata, you can attempt once, but on 400 simply ignore and use the static mapping.
+	4.	In the main fetch_ig_media_insights(...) function that loops over media items:
+	•	Use the above fetch_insights_for_media.
+	•	If it returns None, skip or record “no insights” for that media.
+	•	After collecting results into a list of dicts, build your DataFrame or return an empty DataFrame if all None.
+	•	In the Streamlit wrapper, if the returned DataFrame is empty or None, display st.info("No Instagram insights available for the selected date range.") rather than crashing.
+	5.	Add clear logging:
+
+import logging
+logging.info(f"Found {len(media_list)} media items; filtering yields {len(filtered)}; processing each...")
+logging.info(f"Media {media_id}: metrics tried {metrics}; succeeded {list(results.keys())}")
+logging.warning(f"Media {media_id}: No supported metrics returned; check mapping.")
+
+
+	6.	Ensure the FacebookAdsApi version initialization (in fb_client.py) sets a consistent API version (e.g., v23.0). The SDK calls then use that version.
+
+Include a consolidated snippet in fetch_organic.py such as:
+
+import logging
+from facebook_business.adobjects.igmedia import IGMedia
+from facebook_business.exceptions import FacebookRequestError
+
+# Static mapping: adapt after manual testing and official docs.
+SUPPORTED_METRICS_BY_PRODUCT = {
+    'FEED': ['impressions', 'reach', 'engagement', 'saved', 'comments', 'likes', 'shares'],
+    'REELS': ['impressions', 'reach', 'engagement', 'comments', 'likes', 'shares'],
+}
+
+def fetch_insights_for_media(media: dict) -> dict | None:
+    media_id = media.get('id')
+    if not media_id:
+        logging.warning("Missing media id in fetch_insights_for_media call.")
+        return None
+    product_type = media.get('media_product_type', 'FEED')
+    metrics = SUPPORTED_METRICS_BY_PRODUCT.get(product_type, SUPPORTED_METRICS_BY_PRODUCT['FEED']).copy()
+    if media.get('media_type') == 'VIDEO' and product_type == 'FEED':
+        metrics.append('video_views')
+    # Remove duplicates
+    metrics = list(dict.fromkeys(metrics))
+    # Bulk fetch
+    results: dict[str, list] = {}
+    try:
+        resp = IGMedia(media_id).get_insights(params={'metric': ','.join(metrics)})
+        if isinstance(resp, list) and resp:
+            for entry in resp:
+                name = entry.get('name')
+                results[name] = entry.get('values')
+            logging.info(f"Media {media_id}: insights fetched for metrics {list(results.keys())}")
+            return results
+        else:
+            logging.warning(f"Media {media_id}: insights returned no data or unexpected format: {resp}")
+    except FacebookRequestError as e:
+        logging.warning(f"Media {media_id}: bulk insights error: {e.api_error_message()}; falling back per-metric.")
+    except Exception as e:
+        logging.error(f"Media {media_id}: unexpected error during bulk insights fetch: {e}")
+
+    # Per-metric fallback
+    final: dict[str, list] = {}
+    for m in metrics:
+        try:
+            resp = IGMedia(media_id).get_insights(params={'metric': m})
+            if isinstance(resp, list) and resp:
+                entry = resp[0]
+                final[m] = entry.get('values')
+                logging.info(f"Media {media_id}: metric {m} succeeded.")
+            else:
+                logging.info(f"Media {media_id}: metric {m} returned no data.")
+        except FacebookRequestError as e:
+            logging.warning(f"Media {media_id}: metric {m} unsupported or error: {e.api_error_message()}.")
+        except Exception as e:
+            logging.error(f"Media {media_id}: unexpected error for metric {m}: {e}")
+    if final:
+        return final
+    else:
+        logging.warning(f"Media {media_id}: no supported metrics returned; check SUPPORTED_METRICS_BY_PRODUCT mapping.")
+        return None
+
+Integrate this into your existing fetch_ig_media_insights function in fetch_organic.py. In your Streamlit function, handle None/empty gracefully.
+
+⸻
+
+2. fetch_paid.py (and/or api_helpers.py where paid insights are fetched)
+	1.	Define a minimal valid list of ad insight fields. Remove invalid fields like status or nested creative{...}. For example:
+
+AD_INSIGHTS_FIELDS = [
+    'ad_id',
+    'ad_name',
+    'adset_id',
+    'adset_name',
+    'campaign_id',
+    'campaign_name',
+    'impressions',
+    'clicks',
+    'spend',
+    'reach',
+    'frequency',
+    'ctr',
+    'cpc',
+    'cpm',
+    'date_start',
+    'date_stop',
+]
+
+	•	If you need additional metrics (e.g., unique_clicks), manually verify in Graph API Explorer and add only if valid.
+
+	2.	Refactor the ad-insights fetch to:
+	•	Call AdAccount(f'act_{AD_ACCOUNT_ID}').get_insights(fields=AD_INSIGHTS_FIELDS, params={'level': 'ad', 'date_preset': date_preset}).
+	•	Collect the results: if each record object has .export_all_data(), call it; else convert via dict(ins_obj).
+	•	Wrap in try/except FacebookRequestError and general except Exception, logging errors and returning None if failure.
+	3.	Creative fetching: instead of nested fields in insights:
+	•	For each ad record with ad_id, call:
+
+ad = Ad(ad_id)
+ad_data = ad.api_get(fields=['creative'])
+creative_id = ad_data.get('creative', {}).get('id')
+if creative_id:
+    creative = AdCreative(creative_id).api_get(fields=['id','name','body','title','image_url','thumbnail_url','object_url'])
+    # Convert via .export_all_data() if available, else dict(creative)
+else:
+    log warning
+
+
+	•	Guard calls: check hasattr(obj, 'export_all_data') before calling.
+	•	Wrap in try/except FacebookRequestError and general except Exception.
+
+	4.	Provide an enrich_insights_with_creatives(insights_list: list[dict]) -> list[dict] that loops over insight records and merges creative fields into each record.
+	5.	Example snippet:
+
+import logging
+from facebook_business.adobjects.adaccount import AdAccount
+from facebook_business.adobjects.adsinsights import AdsInsights
+from facebook_business.adobjects.adcreative import AdCreative
+from facebook_business.adobjects.ad import Ad
+from facebook_business.exceptions import FacebookRequestError
+import os
+
+AD_INSIGHTS_FIELDS = [
+    'ad_id', 'ad_name', 'adset_id', 'adset_name', 'campaign_id', 'campaign_name',
+    'impressions', 'clicks', 'spend', 'reach', 'frequency', 'ctr', 'cpc', 'cpm',
+    'date_start', 'date_stop'
+]
+
+def fetch_ad_insights(ad_account_id: str, date_preset: str = 'last_7d') -> list[dict] | None:
+    try:
+        account = AdAccount(f'act_{ad_account_id}')
+        insights_iter = account.get_insights(fields=AD_INSIGHTS_FIELDS, params={'level': 'ad', 'date_preset': date_preset})
+        records = []
+        for ins in insights_iter:
+            if hasattr(ins, 'export_all_data'):
+                data = ins.export_all_data()
+            else:
+                data = dict(ins)
+            records.append(data)
+        logging.info(f"Fetched {len(records)} ad insights for account {ad_account_id}.")
+        return records
+    except FacebookRequestError as e:
+        logging.error(f"Ad insights API error: {e.api_error_message()}")
+    except Exception as e:
+        logging.error(f"Unexpected error fetching ad insights: {e}")
+    return None
+
+def fetch_creative_details(ad_id: str) -> dict | None:
+    try:
+        ad = Ad(ad_id)
+        ad_data = ad.api_get(fields=['creative'])
+        creative_info = ad_data.get('creative', {})
+        creative_id = creative_info.get('id')
+        if not creative_id:
+            logging.warning(f"Ad {ad_id} missing creative id.")
+            return None
+        creative = AdCreative(creative_id).api_get(fields=['id','name','body','title','image_url','thumbnail_url','object_url'])
+        if hasattr(creative, 'export_all_data'):
+            return creative.export_all_data()
+        else:
+            return dict(creative)
+    except FacebookRequestError as e:
+        logging.error(f"Creative fetch error for ad {ad_id}: {e.api_error_message()}")
+    except Exception as e:
+        logging.error(f"Unexpected error fetching creative for ad {ad_id}: {e}")
+    return None
+
+def enrich_insights_with_creatives(insights_list: list[dict]) -> list[dict]:
+    if not insights_list:
+        return []
+    for rec in insights_list:
+        ad_id = rec.get('ad_id') or rec.get('id')
+        if ad_id:
+            creative_data = fetch_creative_details(ad_id)
+            if creative_data:
+                rec.update({
+                    'creative_name': creative_data.get('name'),
+                    'creative_body': creative_data.get('body'),
+                    'creative_title': creative_data.get('title'),
+                    'creative_image_url': creative_data.get('image_url'),
+                })
+    return insights_list
+
+
+	6.	In your paid-insights calling code (e.g., in dashboard.py), handle the case when fetch_ad_insights(...) returns None or empty: display a Streamlit message instead of error.
+
+⸻
+
+3. fb_client.py
+	1.	Ensure initialization sets the FacebookAdsApi with a consistent recent API version, e.g.:
+
+from facebook_business.api import FacebookAdsApi
+import os, logging
+
+def init_facebook_api() -> bool:
+    app_id = os.getenv('META_APP_ID')
+    app_secret = os.getenv('META_APP_SECRET')
+    access_token = os.getenv('META_ACCESS_TOKEN') or os.getenv('PAGE_ACCESS_TOKEN')
+    if not app_id or not app_secret or not access_token:
+        logging.error("Facebook credentials missing (META_APP_ID, META_APP_SECRET, META_ACCESS_TOKEN).")
+        return False
+    FacebookAdsApi.init(app_id, app_secret, access_token, api_version='v23.0')
+    logging.info("Initialized FacebookAdsApi with v23.0")
+    return True
+
+def validate_credentials() -> bool:
+    from facebook_business.adobjects.adaccount import AdAccount
+    account_id = os.getenv('AD_ACCOUNT_ID')
+    if not account_id:
+        logging.error("AD_ACCOUNT_ID not set.")
+        return False
+    try:
+        acc = AdAccount(f'act_{account_id}').api_get(fields=['id'])
+        logging.info(f"Credential validation OK for AdAccount {acc.get('id')}")
+        return True
+    except Exception as e:
+        logging.error(f"Credential validation failed: {e}")
+        return False
+
+
+	2.	If any other functions (e.g., token validation, page validation) are referenced but missing, implement them or remove their imports.
+
+⸻
+
+4. dashboard.py (Streamlit)
+	1.	Wherever you call the organic insights fetch (e.g., cached_fetch_ig_media_insights(...)), wrap in try/except and check for None or empty DataFrame:
+
+try:
+    df = fetch_ig_media_insights(ig_user_id, since, until)
+    if df is None or df.empty:
+        st.info("No Instagram organic insights available for the selected date range.")
+    else:
+        # display df or charts...
+except Exception as e:
+    logging.error(f"Error fetching IG insights: {e}")
+    st.error("Failed to fetch Instagram insights. Check logs.")
+
+
+	2.	Similarly for paid insights: if fetch_ad_insights returns None, show st.warning("No paid insights available or an API error occurred.").
+	3.	Ensure caching functions handle exceptions so cache misses don’t crash the app.
+
+⸻
+
+5. Logging & future-proofing
+	•	Add logging at INFO/WARNING levels to record which metrics succeeded or failed for each media. Over time, update SUPPORTED_METRICS_BY_PRODUCT based on logs.
+	•	Optionally, persist unsupported metrics in a JSON file so future runs skip them immediately.
+	•	Document in comments which metrics were tested and confirmed supported for Feed vs Reels.
+	•	When Meta deprecates or introduces metrics, update the static mapping accordingly.
+	•	Use a recent Graph API version consistently (e.g., v23.0).
+
+⸻
+
+6. Testing
+
+After refactoring:
+	1.	Create a standalone test script (outside Streamlit) to test fetch_insights_for_media on a known media ID:
+
+if __name__ == '__main__':
+    from fetch_organic import fetch_insights_for_media
+    test_media = {'id': 'YOUR_TEST_MEDIA_ID', 'media_product_type': 'REELS', 'media_type': 'VIDEO'}
+    print(fetch_insights_for_media(test_media))
+
+
+	2.	Test paid insights:
+
+from fetch_paid import fetch_ad_insights, enrich_insights_with_creatives
+ad_account_id = os.getenv('AD_ACCOUNT_ID')
+insights = fetch_ad_insights(ad_account_id, date_preset='last_7d')
+print(insights)
+if insights:
+    enriched = enrich_insights_with_creatives(insights)
+    print(enriched)
+
+
+	3.	Verify no 400 errors, and at least some data returns for valid recent posts/ads.
+	4.	Integrate into Streamlit and verify the UI handles no-data gracefully.
+
+⸻
+
+7. Summary for the assistant
+	•	In fetch_organic.py, replace dynamic metric logic with a static mapping and bulk + per-metric fallback as shown.
+	•	In fetch_paid.py (or api_helpers.py), remove invalid insight fields, separate creative fetch, guard .export_all_data(), wrap in try/except.
+	•	In fb_client.py, implement or remove missing functions like validate_credentials, always init API with consistent version.
+	•	In dashboard.py, add try/except around fetch calls, check for None/empty, display user-friendly Streamlit messages.
+	•	Add logging in all modules to record successes/failures and help future-proof metric mappings.
+	•	Use API version v23.0 (or the latest you require).
+	•	Provide test scripts or instructions so the developer can verify functionality.
+
+Below, integrate the provided code snippets into the corresponding modules, replacing or augmenting existing functions. Ensure imports and naming align with your project structure. After refactoring, run tests to confirm that:
+	•	Instagram organic insights fetch returns valid data or gracefully reports “no data” without crashing.
+	•	Paid ad insights fetch returns valid records or gracefully reports errors.
+	•	No invalid metrics or fields cause 400 errors.
+	•	The dashboard handles all cases smoothly.
+
+Proceed to refactor each file accordingly.
+
+Use this entire block as your AI prompt. It tells the assistant exactly which modules to update, what patterns to apply, and includes the essential code snippets (static mapping for organic metrics, minimal fields for paid insights, safe creative fetch, fb_client init/validate, Streamlit error handling). The assistant should output the refactored code files (or diffs) implementing these changes.
