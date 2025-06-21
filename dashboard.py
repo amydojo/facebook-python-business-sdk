@@ -19,6 +19,13 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Import OpenAI with error handling
+try:
+    import openai
+except ImportError:
+    st.error("Missing `openai` package. Please install with `pip install openai`.")
+    st.stop()
+
 # Import our modules
 from fetch_organic import (
     fetch_ig_media_insights, 
@@ -45,7 +52,7 @@ if openai_api_key:
     openai.api_key = openai_api_key
     logger.info("OpenAI API key configured")
 else:
-    logger.warning("OpenAI API key not found")
+    logger.warning("OPENAI_API_KEY not set: AI commentary disabled")
 
 # Set page config
 st.set_page_config(
@@ -55,7 +62,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-import openai
 from config import config
 
 # Logger already configured at top of file
@@ -505,13 +511,13 @@ def show_paid_campaign_insights():
     # Sidebar controls for paid insights
     with st.sidebar:
         st.subheader("📅 Paid Campaign Settings")
-        
+
         date_preset = st.selectbox(
             "Date Range",
             options=["yesterday", "last_7d", "last_30d", "this_month", "last_month"],
             index=1  # Default to last_7d
         )
-        
+
         include_creatives = st.checkbox("Include Creative Previews", value=True)
 
     with st.spinner("Loading paid campaign data..."):
@@ -529,26 +535,26 @@ def show_paid_campaign_insights():
             # Display summary metrics
             if len(paid_data) > 0:
                 col1, col2, col3, col4 = st.columns(4)
-                
+
                 with col1:
                     total_spend = paid_data['spend'].astype(float).sum()
                     st.metric("Total Spend", f"${total_spend:,.2f}")
-                
+
                 with col2:
                     total_impressions = paid_data['impressions'].astype(int).sum()
                     st.metric("Total Impressions", f"{total_impressions:,}")
-                
+
                 with col3:
                     total_clicks = paid_data['clicks'].astype(int).sum()
                     st.metric("Total Clicks", f"{total_clicks:,}")
-                
+
                 with col4:
                     avg_ctr = (total_clicks / total_impressions * 100) if total_impressions > 0 else 0
                     st.metric("Average CTR", f"{avg_ctr:.2f}%")
 
             # Show campaign data table
             st.subheader("📊 Campaign Performance Data")
-            
+
             # Format numeric columns for better display
             display_df = paid_data.copy()
             if 'spend' in display_df.columns:
@@ -557,28 +563,28 @@ def show_paid_campaign_insights():
                 display_df['ctr'] = display_df['ctr'].astype(float).round(3)
             if 'cpc' in display_df.columns:
                 display_df['cpc'] = display_df['cpc'].astype(float).round(3)
-            
+
             st.dataframe(display_df, use_container_width=True)
 
             # Show creative previews if available
             if include_creatives and 'creative_image_url' in paid_data.columns:
                 st.subheader("🎨 Creative Previews")
-                
+
                 # Filter rows with creative URLs
                 creative_rows = paid_data[paid_data['creative_image_url'].notna()].head(5)
-                
+
                 if not creative_rows.empty:
                     for _, row in creative_rows.iterrows():
                         with st.expander(f"Creative: {row.get('creative_name', 'Unnamed')}"):
                             col1, col2 = st.columns([1, 2])
-                            
+
                             with col1:
                                 if pd.notna(row.get('creative_image_url')):
                                     try:
                                         st.image(row['creative_image_url'], caption="Creative Preview")
                                     except:
                                         st.text("Preview not available")
-                            
+
                             with col2:
                                 st.write(f"**Campaign:** {row.get('campaign_name', 'N/A')}")
                                 st.write(f"**Ad:** {row.get('ad_name', 'N/A')}")
