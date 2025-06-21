@@ -35,13 +35,6 @@ except ImportError as e:
     get_paid_insights = None
     PAID_INSIGHTS_AVAILABLE = False
 
-import openai
-from config import config
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Configure OpenAI
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if openai_api_key:
@@ -57,6 +50,13 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+import openai
+from config import config
+
+# Configure logging first
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @st.cache_data(ttl=600)
 def cached_fetch_ig_media_insights(ig_user_id: str, since: str = None, until: str = None) -> pd.DataFrame:
