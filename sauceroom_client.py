@@ -98,6 +98,72 @@ class SauceRoomClient:
             logger.error(f"Failed to sync campaigns: {e}")
             return False
     
+    def sync_attribution_data(self, attribution_results: Dict[str, Any]) -> bool:
+        """Sync attribution analysis results with SauceRoom"""
+        try:
+            payload = {
+                'attribution_data': attribution_results,
+                'analysis_timestamp': datetime.now().isoformat(),
+                'source': 'campaign_optimizer_attribution'
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/api/attribution/sync",
+                json=payload,
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                logger.info("Successfully synced attribution data to SauceRoom")
+                return True
+            else:
+                logger.warning(f"Attribution sync failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to sync attribution data: {e}")
+            return False
+    
+    def get_unified_customer_journey(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get unified customer journey combining SauceRoom and social media touchpoints"""
+        try:
+            params = {}
+            if user_id:
+                params['user_id'] = user_id
+                
+            response = self.session.get(
+                f"{self.base_url}/api/journey/unified",
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                journey_data = response.json()
+                
+                # Enhance with social media touchpoints
+                if journey_data.get('touchpoints'):
+                    enhanced_touchpoints = []
+                    for touchpoint in journey_data['touchpoints']:
+                        # Add social media context
+                        if touchpoint.get('source') in ['facebook', 'instagram']:
+                            touchpoint['social_context'] = {
+                                'platform': touchpoint['source'],
+                                'attribution_eligible': True,
+                                'content_type': touchpoint.get('content_type', 'unknown')
+                            }
+                        enhanced_touchpoints.append(touchpoint)
+                    
+                    journey_data['touchpoints'] = enhanced_touchpoints
+                
+                return journey_data
+            else:
+                logger.warning(f"Unified journey API returned {response.status_code}")
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Failed to get unified customer journey: {e}")
+            return {}
+    
     def create_audience_segment(self, segment_data: Dict[str, Any]) -> Optional[str]:
         """Create audience segment in SauceRoom based on campaign data"""
         try:

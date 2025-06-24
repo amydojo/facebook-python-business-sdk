@@ -136,6 +136,77 @@ def get_instagram_insights():
         return jsonify({'error': str(e)}), 500
 
 @api_app.route('/api/campaigns/performance', methods=['GET'])
+@app.route('/api/attribution/analysis', methods=['GET'])
+@require_api_key
+def get_attribution_analysis():
+    """Get attribution analysis for SauceRoom integration"""
+    try:
+        # Get parameters
+        attribution_model = request.args.get('model', 'linear')
+        date_preset = request.args.get('date_preset', 'last_30d')
+        
+        # Import attribution functions
+        from attribution import (
+            build_journeys, first_touch, last_touch, linear_attribution,
+            position_based, time_decay, markov_chain_attribution,
+            calculate_channel_attribution_summary
+        )
+        
+        # Mock data for demonstration - replace with actual data
+        touchpoints = pd.DataFrame({
+            'user_id': ['user_1', 'user_1', 'user_2', 'user_2', 'user_3'],
+            'channel': ['Instagram_Organic', 'Facebook_Ads', 'Instagram_Organic', 'Facebook_Ads', 'Instagram_Organic'],
+            'timestamp': pd.date_range('2024-01-01', periods=5, freq='D'),
+            'conversion_id': ['conv_1', 'conv_1', 'conv_2', 'conv_2', 'conv_3'],
+            'revenue_amount': [100.0, 100.0, 250.0, 250.0, 75.0]
+        })
+        
+        # Build journeys
+        journeys = build_journeys(touchpoints)
+        
+        if journeys.empty:
+            return jsonify({
+                'status': 'error',
+                'message': 'No journey data available'
+            })
+        
+        # Apply attribution model
+        attribution_functions = {
+            'first_touch': first_touch,
+            'last_touch': last_touch,
+            'linear': linear_attribution,
+            'position_based': position_based,
+            'time_decay': time_decay,
+            'markov_chain': markov_chain_attribution
+        }
+        
+        if attribution_model not in attribution_functions:
+            return jsonify({
+                'status': 'error',
+                'message': f'Invalid attribution model: {attribution_model}'
+            })
+        
+        # Run attribution analysis
+        attribution_results = attribution_functions[attribution_model](journeys)
+        attribution_summary = calculate_channel_attribution_summary(attribution_results)
+        
+        return jsonify({
+            'status': 'success',
+            'model': attribution_model,
+            'date_preset': date_preset,
+            'summary': attribution_summary.to_dict('records'),
+            'detailed_results': attribution_results.to_dict('records'),
+            'total_attributed_revenue': float(attribution_summary['attributed_revenue'].sum()),
+            'channel_count': len(attribution_summary)
+        })
+        
+    except Exception as e:
+        logger.error(f"Attribution analysis API error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
 def get_campaign_performance():
     """Get paid campaign performance for SauceRoom integration"""
     try:

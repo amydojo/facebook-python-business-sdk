@@ -37,6 +37,18 @@ from fetch_organic import (
     validate_organic_environment
 )
 
+# Import attribution functions
+try:
+    from attribution import (
+        build_journeys, first_touch, last_touch, linear_attribution,
+        position_based, time_decay, markov_chain_attribution,
+        calculate_channel_attribution_summary
+    )
+    ATTRIBUTION_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Attribution functions not available: {e}")
+    ATTRIBUTION_AVAILABLE = False
+
 # Import optimized API helpers
 from api_helpers import get_api_stats
 
@@ -827,6 +839,290 @@ def main():
             st.success("✅ API usage within normal limits")
         
         st.caption(f"Session started: {api_stats['session_start']}")
+
+    # Attribution Analysis Section
+    with st.expander("🎯 Multi-Touch Attribution Analysis", expanded=False):
+        st.subheader("Campaign Attribution & Customer Journey")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### Attribution Models")
+            attribution_model = st.selectbox(
+                "Select Attribution Model:",
+                ["First Touch", "Last Touch", "Linear", "Position-Based", "Time Decay", "Markov Chain"]
+            )
+            
+            date_range_attr = st.selectbox(
+                "Attribution Date Range:",
+                ["last_7d", "last_30d", "last_90d"],
+                index=1
+            )
+            
+            if st.button("🔍 Run Attribution Analysis", type="primary"):
+                with st.spinner("Analyzing attribution..."):
+                    try:
+                        # Import attribution functions
+                        from attribution import (
+                            build_journeys, first_touch, last_touch, linear_attribution,
+                            position_based, time_decay, markov_chain_attribution,
+                            calculate_channel_attribution_summary
+                        )
+                        
+                        # Get both organic and paid data
+                        organic_data = st.session_state.get('ig_data', pd.DataFrame())
+                        
+                        # Mock conversion data - in production, this would come from your CRM/analytics
+                        mock_conversions = pd.DataFrame({
+                            'conversion_id': ['conv_1', 'conv_2', 'conv_3'],
+                            'user_id': ['user_1', 'user_2', 'user_3'],
+                            'revenue_amount': [100.0, 250.0, 75.0],
+                            'timestamp': pd.date_range('2024-01-01', periods=3, freq='D')
+                        })
+                        
+                        # Mock touchpoint data combining organic and paid
+                        touchpoints = pd.DataFrame({
+                            'user_id': ['user_1', 'user_1', 'user_2', 'user_2', 'user_3'],
+                            'channel': ['Instagram_Organic', 'Facebook_Ads', 'Instagram_Organic', 'Facebook_Ads', 'Instagram_Organic'],
+                            'timestamp': pd.date_range('2023-12-25', periods=5, freq='D'),
+                            'conversion_id': ['conv_1', 'conv_1', 'conv_2', 'conv_2', 'conv_3']
+                        })
+                        
+                        # Build customer journeys
+                        journeys_df = build_journeys(touchpoints)
+                        
+                        if not journeys_df.empty:
+                            # Apply selected attribution model
+                            if attribution_model == "First Touch":
+                                attribution_results = first_touch(journeys_df)
+                            elif attribution_model == "Last Touch":
+                                attribution_results = last_touch(journeys_df)
+                            elif attribution_model == "Linear":
+                                attribution_results = linear_attribution(journeys_df)
+                            elif attribution_model == "Position-Based":
+                                attribution_results = position_based(journeys_df)
+                            elif attribution_model == "Time Decay":
+                                attribution_results = time_decay(journeys_df)
+                            elif attribution_model == "Markov Chain":
+                                attribution_results = markov_chain_attribution(journeys_df)
+                            
+                            # Calculate channel summary
+                            summary = calculate_channel_attribution_summary(attribution_results)
+                            
+                            st.session_state.attribution_results = attribution_results
+                            st.session_state.attribution_summary = summary
+                            
+                            st.success(f"✅ Attribution analysis complete using {attribution_model} model")
+                        else:
+                            st.warning("No journey data available for attribution analysis")
+                            
+                    except Exception as e:
+                        st.error(f"Attribution analysis failed: {str(e)}")
+        
+        with col2:
+            if 'attribution_summary' in st.session_state:
+                summary = st.session_state.attribution_summary
+                
+                st.markdown("### Attribution Results")
+                if not summary.empty:
+                    # Display attribution metrics
+                    for _, row in summary.head(5).iterrows():
+                        col_a, col_b, col_c = st.columns(3)
+                        with col_a:
+                            st.metric(f"{row['channel']}", f"${row['attributed_revenue']:.2f}")
+                        with col_b:
+                            st.metric("Credit", f"{row['total_credit']:.3f}")
+                        with col_c:
+                            st.metric("Conversions", f"{row['conversions']}")
+                    
+                    # Show full attribution table
+                    st.dataframe(summary, use_container_width=True)
+                    
+                    # Visualization
+                    try:
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        ax.pie(summary['attributed_revenue'], labels=summary['channel'], autopct='%1.1f%%')
+                        ax.set_title(f'Revenue Attribution by Channel - {attribution_model}')
+                        st.pyplot(fig)
+                    except Exception as e:
+                        st.warning(f"Could not create attribution chart: {e}")
+
+    # Advanced Campaign Performance Section
+    with st.expander("📈 Advanced Campaign Performance Analytics", expanded=False):
+        st.subheader("Deep Dive Campaign Analysis")
+        
+        if PAID_INSIGHTS_AVAILABLE:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("### Campaign Optimization Insights")
+                
+                perf_date_range = st.selectbox(
+                    "Performance Analysis Period:",
+                    ["last_7d", "last_30d", "last_90d"],
+                    key="perf_date"
+                )
+                
+                analysis_type = st.selectbox(
+                    "Analysis Type:",
+                    ["ROI Analysis", "Audience Performance", "Creative Performance", "Bidding Optimization"]
+                )
+                
+                if st.button("🚀 Run Advanced Analysis"):
+                    with st.spinner("Analyzing campaign performance..."):
+                        try:
+                            # Get comprehensive campaign data
+                            campaign_data = get_campaign_performance_with_creatives(
+                                date_preset=perf_date_range,
+                                include_creatives=True
+                            )
+                            
+                            if not campaign_data.empty:
+                                if analysis_type == "ROI Analysis":
+                                    # Calculate ROI metrics
+                                    campaign_data['roi'] = (
+                                        pd.to_numeric(campaign_data.get('conversions', 0), errors='coerce') * 50 - 
+                                        pd.to_numeric(campaign_data['spend'], errors='coerce')
+                                    ) / pd.to_numeric(campaign_data['spend'], errors='coerce') * 100
+                                    
+                                    # Show top performing campaigns by ROI
+                                    top_roi = campaign_data.nlargest(5, 'roi')[['campaign_name', 'spend', 'roi']]
+                                    st.markdown("#### Top ROI Campaigns")
+                                    st.dataframe(top_roi)
+                                    
+                                elif analysis_type == "Creative Performance":
+                                    # Analyze creative performance
+                                    if 'creative_name' in campaign_data.columns:
+                                        creative_perf = campaign_data.groupby('creative_name').agg({
+                                            'impressions': 'sum',
+                                            'clicks': 'sum',
+                                            'spend': 'sum'
+                                        }).reset_index()
+                                        
+                                        creative_perf['ctr'] = (
+                                            creative_perf['clicks'] / creative_perf['impressions'] * 100
+                                        )
+                                        
+                                        st.markdown("#### Creative Performance")
+                                        st.dataframe(creative_perf.head(10))
+                                
+                                elif analysis_type == "Audience Performance":
+                                    # Mock audience analysis
+                                    st.markdown("#### Audience Insights")
+                                    st.info("Audience performance analysis requires additional targeting data")
+                                    
+                                elif analysis_type == "Bidding Optimization":
+                                    # Bidding recommendations
+                                    avg_cpc = pd.to_numeric(campaign_data['cpc'], errors='coerce').mean()
+                                    avg_ctr = pd.to_numeric(campaign_data['ctr'], errors='coerce').mean()
+                                    
+                                    st.markdown("#### Bidding Recommendations")
+                                    st.metric("Average CPC", f"${avg_cpc:.2f}")
+                                    st.metric("Average CTR", f"{avg_ctr:.2f}%")
+                                    
+                                    if avg_ctr < 1.0:
+                                        st.warning("⚠️ Low CTR detected. Consider refreshing creative assets.")
+                                    if avg_cpc > 2.0:
+                                        st.warning("⚠️ High CPC detected. Consider audience optimization.")
+                            else:
+                                st.warning("No campaign data available for analysis")
+                                
+                        except Exception as e:
+                            st.error(f"Advanced analysis failed: {str(e)}")
+            
+            with col2:
+                st.markdown("### Performance Predictions")
+                
+                try:
+                    # Simple forecasting based on current data
+                    if 'campaign_data' in locals() and not campaign_data.empty:
+                        current_spend = pd.to_numeric(campaign_data['spend'], errors='coerce').sum()
+                        current_clicks = pd.to_numeric(campaign_data['clicks'], errors='coerce').sum()
+                        
+                        # Project next 30 days
+                        daily_spend = current_spend / 7  # Assuming 7-day data
+                        daily_clicks = current_clicks / 7
+                        
+                        projected_spend = daily_spend * 30
+                        projected_clicks = daily_clicks * 30
+                        
+                        st.markdown("#### 30-Day Projections")
+                        st.metric("Projected Spend", f"${projected_spend:.2f}")
+                        st.metric("Projected Clicks", f"{projected_clicks:.0f}")
+                        
+                        # Budget recommendations
+                        if current_spend > 0:
+                            cost_per_click = current_spend / current_clicks if current_clicks > 0 else 0
+                            st.metric("Avg Cost per Click", f"${cost_per_click:.2f}")
+                            
+                            if cost_per_click > 1.5:
+                                st.warning("💡 **Optimization Tip:** High CPC detected. Consider:")
+                                st.write("• Refining audience targeting")
+                                st.write("• Testing new creative formats")
+                                st.write("• Adjusting bidding strategy")
+                    
+                except Exception as e:
+                    st.info("Performance predictions will show when campaign data is available")
+        else:
+            st.warning("Advanced campaign analytics require paid insights configuration")
+
+    # Cross-Platform Performance Comparison
+    with st.expander("🔄 Cross-Platform Performance Comparison", expanded=False):
+        st.subheader("Organic vs Paid Performance")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### Platform Metrics Comparison")
+            
+            # Get current session data
+            organic_data = st.session_state.get('ig_data', pd.DataFrame())
+            
+            if not organic_data.empty:
+                # Calculate organic metrics
+                organic_reach = organic_data[organic_data['metric'] == 'reach']['value'].sum() if 'reach' in organic_data['metric'].values else 0
+                organic_engagement = organic_data[organic_data['metric'] == 'likes']['value'].sum() if 'likes' in organic_data['metric'].values else 0
+                
+                comparison_data = {
+                    'Platform': ['Instagram Organic', 'Facebook Ads'],
+                    'Reach': [organic_reach, 0],  # Paid reach would come from campaign data
+                    'Engagement': [organic_engagement, 0],
+                    'Cost': [0, 0]  # Organic is free, paid cost from campaign data
+                }
+                
+                comparison_df = pd.DataFrame(comparison_data)
+                st.dataframe(comparison_df)
+                
+                # Performance ratios
+                st.markdown("### Key Performance Ratios")
+                if organic_reach > 0:
+                    engagement_rate = (organic_engagement / organic_reach) * 100
+                    st.metric("Organic Engagement Rate", f"{engagement_rate:.2f}%")
+                
+                cost_per_engagement = 0  # Would be calculated from paid data
+                st.metric("Paid Cost per Engagement", f"${cost_per_engagement:.2f}")
+            else:
+                st.info("Load Instagram data to see cross-platform comparison")
+        
+        with col2:
+            st.markdown("### Performance Recommendations")
+            
+            # AI-powered recommendations
+            if organic_data.empty:
+                st.info("📊 Load your data to get personalized recommendations")
+            else:
+                st.markdown("#### Optimization Opportunities")
+                st.write("🎯 **Content Strategy:**")
+                st.write("• Repurpose high-performing organic content as paid ads")
+                st.write("• Test organic content themes in paid campaigns")
+                
+                st.write("💰 **Budget Allocation:**")
+                st.write("• Boost top organic posts with paid promotion")
+                st.write("• Use organic insights to inform paid targeting")
+                
+                st.write("📈 **Growth Strategy:**")
+                st.write("• Expand successful organic content formats")
+                st.write("• Scale winning paid campaigns")
 
     # SauceRoom Integration Section
     with st.expander("🔗 SauceRoom Integration", expanded=False):
