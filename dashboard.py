@@ -828,6 +828,66 @@ def main():
         
         st.caption(f"Session started: {api_stats['session_start']}")
 
+    # SauceRoom Integration Section
+    with st.expander("🔗 SauceRoom Integration", expanded=False):
+        st.subheader("Connect with SauceRoom")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### API Endpoints")
+            st.code("""
+# Get Instagram insights
+GET /api/instagram/insights?days=7
+
+# Get campaign performance  
+GET /api/campaigns/performance?date_preset=last_7d
+
+# Get analytics summary
+GET /api/analytics/summary
+            """)
+            
+            st.markdown("### Authentication")
+            api_secret = os.getenv('API_SECRET', 'Not configured')
+            if api_secret == 'Not configured':
+                st.warning("⚠️ Set API_SECRET environment variable for secure access")
+            else:
+                st.success("✅ API authentication configured")
+            
+            st.markdown("**Header:** `Authorization: Bearer YOUR_API_SECRET`")
+        
+        with col2:
+            st.markdown("### Integration Examples")
+            
+            # Test API connection
+            if st.button("🧪 Test API Connection"):
+                try:
+                    import requests
+                    
+                    # Test health endpoint
+                    response = requests.get(f"http://localhost:5001/health", timeout=5)
+                    if response.status_code == 200:
+                        st.success("✅ API server is running")
+                        st.json(response.json())
+                    else:
+                        st.error("❌ API server not responding")
+                except Exception as e:
+                    st.error(f"❌ Connection failed: {e}")
+                    st.info("💡 Start API server with: `python api_endpoints.py`")
+            
+            # SauceRoom webhook URL
+            st.markdown("**Webhook URL for SauceRoom:**")
+            repl_url = os.getenv('REPL_SLUG', 'your-repl-name')
+            webhook_url = f"https://{repl_url}.replit.app/api/webhook/sauceroom"
+            st.code(webhook_url)
+            
+            # Integration benefits
+            st.markdown("### Benefits")
+            st.write("• **Unified Analytics** - Combine social media performance with SauceRoom engagement")
+            st.write("• **Cross-platform Insights** - Track user journey across platforms")
+            st.write("• **Automated Optimization** - Use SauceRoom data to optimize ad targeting")
+            st.write("• **Real-time Sync** - Live data exchange between applications")
+
     # Footer
     st.markdown("---")
     st.markdown("*Built with Streamlit • Powered by Meta Graph API & OpenAI • Optimized with Rate Limiting*")

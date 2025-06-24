@@ -24,6 +24,19 @@ args = "pip install -r requirements.txt"
 task = "shell.exec"
 args = "streamlit run dashboard.py --server.port 5000 --server.address 0.0.0.0"
 
+[[workflows.workflow]]
+name = "Run with API"
+author = 39401399
+mode = "parallel"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pip install -r requirements.txt"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python start_api_server.py"
+
 [[ports]]
 localPort = 5000
 externalPort = 80
