@@ -28,14 +28,29 @@ except ImportError:
     OPENAI_AVAILABLE = False
     logger.warning("OpenAI package not available - AI features disabled")
 
-# Import our modules
-from fetch_organic import (
-    fetch_ig_media_insights, 
-    get_ig_follower_count, 
-    fetch_ig_user_insights,
-    compute_instagram_kpis,
-    validate_organic_environment
-)
+# Import our modules with error handling
+try:
+    from fetch_organic import (
+        fetch_ig_media_insights, 
+        get_ig_follower_count, 
+        fetch_ig_user_insights,
+        compute_instagram_kpis,
+        validate_organic_environment
+    )
+    ORGANIC_AVAILABLE = True
+    logger.info("✅ Organic insights functions imported successfully")
+except ImportError as e:
+    logger.error(f"❌ Failed to import organic insights functions: {e}")
+    ORGANIC_AVAILABLE = False
+    # Create dummy functions
+    def fetch_ig_media_insights(*args, **kwargs):
+        return pd.DataFrame()
+    def get_ig_follower_count(*args, **kwargs):
+        return None
+    def validate_organic_environment(*args, **kwargs):
+        return {'instagram_insights_enabled': False}
+    def compute_instagram_kpis(*args, **kwargs):
+        return {}
 
 # Import attribution functions
 try:
@@ -50,7 +65,14 @@ except ImportError as e:
     ATTRIBUTION_AVAILABLE = False
 
 # Import optimized API helpers
-from api_helpers import get_api_stats
+try:
+    from api_helpers import get_api_stats
+    API_HELPERS_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"API helpers not available: {e}")
+    API_HELPERS_AVAILABLE = False
+    def get_api_stats():
+        return {'total_calls': 0, 'session_duration_minutes': 0, 'calls_per_minute': 0, 'session_start': datetime.now().isoformat()}
 
 # Import paid insights functions with error handling
 try:
@@ -782,17 +804,22 @@ def validate_environment():
         st.sidebar.warning(f"⚠️ Missing environment variables: {', '.join(missing_vars)}")
         with st.sidebar.expander("🔧 Environment Setup Help"):
             st.write("**Required for Instagram insights:**")
-            st.code("PAGE_ID, IG_USER_ID, PAGE_ACCESS_TOKEN")
+            st.code("PAGE_ACCESS_TOKEN, IG_USER_ID")
             st.write("**Required for paid campaigns:**")
             st.code("AD_ACCOUNT_ID, META_ACCESS_TOKEN")
-            st.write("**Recommended for security:**")
-            st.code("META_APP_ID, META_APP_SECRET")
             st.write("**Optional for AI features:**")
             st.code("OPENAI_API_KEY")
             st.write("**How to set in Replit:**")
-            st.write("1. Click the 🔒 Secrets tab in the sidebar")
-            st.write("2. Add each environment variable")
-            st.write("3. Restart your app")
+            st.write("1. Click the 🔒 **Secrets** tab in the left sidebar")
+            st.write("2. Add each environment variable with its value")
+            st.write("3. Click **Add new secret** for each one")
+            st.write("4. Restart your app using the **Run** button")
+            
+            # Show current Replit URL for reference
+            st.write("**Your app URL:**")
+            repl_slug = os.getenv('REPL_SLUG', 'your-repl-name')
+            app_url = f"https://{repl_slug}.replit.app"
+            st.code(app_url)
     else:
         st.sidebar.success("✅ All environment variables configured")
     
@@ -802,6 +829,50 @@ def main():
     """Main dashboard function"""
     st.title("🚀 AI-Powered Social Campaign Optimizer")
     st.markdown("*Comprehensive Instagram insights with AI-driven recommendations for 2025*")
+    
+    # Show app status and connection info
+    with st.sidebar:
+        st.success("✅ App is running successfully!")
+        
+        # Show current URL info
+        repl_slug = os.getenv('REPL_SLUG', 'your-repl-name') 
+        app_url = f"https://{repl_slug}.replit.app"
+        st.info(f"📱 **App URL:** {app_url}")
+        
+        # Show server info
+        st.caption(f"🖥️ Running on port 5000")
+        st.caption(f"⏰ Started: {datetime.now().strftime('%H:%M:%S')}")
+        
+        # Preview instructions
+        with st.expander("👁️ How to Preview Your App"):
+            st.write("**Option 1: Webview Panel**")
+            st.write("• Look for the **Webview** tab in Replit")
+            st.write("• It should auto-open when the app starts")
+            
+            st.write("**Option 2: New Tab**")
+            st.write("• Click the **Open in new tab** button")
+            st.write("• Or manually visit the URL above")
+            
+            st.write("**Option 3: Replit Console**")
+            st.write("• Check if there's a preview URL in the console")
+            st.write("• Look for messages about 'Network URL'")
+        
+        # Module status
+        st.subheader("📦 Module Status")
+        if ORGANIC_AVAILABLE:
+            st.success("✅ Organic insights ready")
+        else:
+            st.warning("⚠️ Organic insights unavailable")
+            
+        if PAID_INSIGHTS_AVAILABLE:
+            st.success("✅ Paid insights ready")
+        else:
+            st.warning("⚠️ Paid insights unavailable")
+            
+        if API_HELPERS_AVAILABLE:
+            st.success("✅ API helpers ready")
+        else:
+            st.warning("⚠️ API helpers unavailable")
     
     # Validate environment
     env_status = validate_environment()
